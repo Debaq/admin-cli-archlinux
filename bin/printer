@@ -470,7 +470,7 @@ hp_plugin_version_ok() {
 
 list_cups_hp() {
     lpstat -e 2>/dev/null | while read -r printer; do
-        if lpstat -v "$printer" 2>/dev/null | grep -qi "hp\|laserjet"; then
+        if lpstat -v "$printer" 2>/dev/null | grep -q "hp:/"; then
             echo "$printer"
         fi
     done
@@ -743,7 +743,7 @@ install_hp_p1102w() {
             echo -e "  ${CYAN}→ $p${NC}"
         done <<< "$hp_cups"
         echo -e ""
-        echo -e "Prueba con: ${BOLD}lp -d $(echo "$hp_cups" | head -1) /usr/share/cups/data/testprint${NC}"
+        echo -e "Prueba con: ${BOLD}lp -d HP_LaserJet_P1102w /usr/share/cups/data/testprint${NC}"
     fi
 }
 
