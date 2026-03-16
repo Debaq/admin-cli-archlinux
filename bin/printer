@@ -722,14 +722,46 @@ install_hp_p1102w() {
 
     # PASO 5: Cargar firmware en la impresora
     # La P1102w es "host-based" y necesita firmware cada vez que enciende
-    if check_hp_plugin && command -v hp-firmware &>/dev/null; then
+    if check_hp_plugin; then
         echo -e ""
         echo -e "${BOLD}[5/5] Cargando firmware en la impresora...${NC}"
-        if sudo hp-firmware -n 2>/dev/null; then
-            echo -e "  ${GREEN}Firmware cargado en la impresora${NC}"
-        else
-            echo -e "  ${YELLOW}No se pudo cargar firmware ahora (¿impresora apagada?)${NC}"
-            echo -e "  ${CYAN}Se cargará automáticamente al imprimir.${NC}"
+        local fw_loaded=false
+
+        # Buscar archivo de firmware
+        local fw_file
+        fw_file=$(ls /usr/share/hplip/data/firmware/*1102* /usr/share/hplip/data/firmware/*.fw 2>/dev/null | head -1)
+
+        # Método 1: Enviar firmware directo por USB (sin hp-firmware)
+        if [ -n "$fw_file" ]; then
+            local usb_dev=$(ls /dev/usb/lp* 2>/dev/null | head -1)
+            if [ -n "$usb_dev" ]; then
+                echo -e "  ${CYAN}Enviando $(basename "$fw_file") → $usb_dev${NC}"
+                if sudo cp "$fw_file" "$usb_dev" 2>/dev/null; then
+                    fw_loaded=true
+                    echo -e "  ${GREEN}Firmware cargado directamente por USB${NC}"
+                fi
+            fi
+        fi
+
+        # Método 2: Fallback con hp-firmware si el directo falló
+        if [ "$fw_loaded" = false ] && command -v hp-firmware &>/dev/null; then
+            echo -e "  ${CYAN}Intentando con hp-firmware...${NC}"
+            local hp_uri
+            hp_uri=$(lpstat -v HP_LaserJet_P1102w 2>/dev/null | awk '{print $NF}')
+            if [ -n "$hp_uri" ]; then
+                sudo hp-firmware -n -d "$hp_uri" 2>/dev/null && fw_loaded=true
+            else
+                sudo hp-firmware -n 2>/dev/null && fw_loaded=true
+            fi
+            [ "$fw_loaded" = true ] && echo -e "  ${GREEN}Firmware cargado con hp-firmware${NC}"
+        fi
+
+        if [ "$fw_loaded" = false ]; then
+            echo -e "  ${YELLOW}No se pudo cargar firmware ahora.${NC}"
+            if [ -z "$fw_file" ]; then
+                echo -e "  ${RED}No se encontró archivo .fw en /usr/share/hplip/data/firmware/${NC}"
+            fi
+            echo -e "  ${CYAN}El backend HP de CUPS lo cargará al imprimir.${NC}"
         fi
     fi
 
