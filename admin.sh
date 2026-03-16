@@ -78,10 +78,11 @@ while true; do
     echo -e "  ${MAGENTA}[p]${NC} PERMISOS             (Fix Grupos, Chown, Chmod)"
     echo -e "  ${MAGENTA}[m]${NC} MEDIA (A/V)          (Audio, Brillo, Pantallas)"
     echo -e "  ${MAGENTA}[b]${NC} BACKUP/MIGRAR        (FileZilla, Brave, Impresoras)"
-    echo -e "  ${MAGENTA}[i]${NC} IMPRESORAS           (Driver Epson, Hojas Custom)"
+    echo -e "  ${MAGENTA}[i]${NC} IMPRESORAS           (Epson, HP LaserJet)"
     echo -e "  ${MAGENTA}[f]${NC} FIXES APPS           (LibreOffice GTK3, etc.)"
     echo -e "  ${MAGENTA}[0]${NC} SETUP BASE           (Instalación Automática Básica)"
     echo -e "  ${MAGENTA}[S]${NC} SOFTWARE CENTER      (Menú Selección Interactivo)"
+    echo -e "  ${GREEN}[x]${NC} ACTUALIZAR ADMIN-CLI (git pull)"
     echo -e "  ${RED}[q]${NC} SALIR"
     
     echo -e ""
@@ -124,10 +125,17 @@ while true; do
         0)   bash "$ADMIN_CLI_ROOT/bin/setup" || pause ;;
         s|S) bash "$ADMIN_CLI_ROOT/bin/software" || pause ;;
         
-        q|Q) 
+        x|X)
+            echo -e "${CYAN}${BOLD}Actualizando Admin-CLI...${NC}"
+            cd "$ADMIN_CLI_ROOT"
+            git pull
+            echo -e "${GREEN}Listo. Reinicia admin para aplicar cambios.${NC}"
+            pause
+            ;;
+        q|Q)
             clear
             echo -e "${GREEN}¡Sistema optimizado y listo! Hasta luego.${NC}"
-            exit 0 
+            exit 0
             ;;
         *) 
             echo -e "${RED}Opción no válida.${NC}" 

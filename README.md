@@ -52,17 +52,33 @@ El dashboard se **auto-refresca cada 3 segundos** con CPU, RAM, temperatura, IPs
 
 ## Instalacion
 
+**Una linea (online):**
+
+```bash
+curl -sL https://raw.githubusercontent.com/Debaq/admin-cli-archlinux/main/install.sh | bash
+```
+
+**O desde un clon:**
+
 ```bash
 git clone https://github.com/Debaq/admin-cli-archlinux.git
 cd admin-cli-archlinux
 ./install.sh
 ```
 
-Esto agrega `bin/` al `$PATH` y crea el alias `admin`. Recarga tu shell y listo:
+El instalador clona el repo en `~/.admin-cli`, configura el PATH y crea los alias. Recarga tu shell y listo:
 
 ```bash
 source ~/.bashrc   # o ~/.zshrc
 admin
+```
+
+### Actualizar
+
+Desde la terminal o desde el menu principal `[x]`:
+
+```bash
+admin-update
 ```
 
 ---

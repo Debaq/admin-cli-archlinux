@@ -1,50 +1,123 @@
 #!/bin/bash
-# install.sh
+# ============================================================================
+# Admin-CLI Installer
+#
+# Instalacion online:
+#   curl -sL https://raw.githubusercontent.com/Debaq/admin-cli-archlinux/main/install.sh | bash
+#
+# Desde repo clonado:
+#   ./install.sh
+#
+# Actualizar:
+#   admin-update
+# ============================================================================
 
-INSTALL_DIR=$(dirname "$(readlink -f "$0")")
-BIN_DIR="$INSTALL_DIR/bin"
-ADMIN_SCRIPT="$INSTALL_DIR/admin.sh"
+REPO_URL="https://github.com/Debaq/admin-cli-archlinux.git"
+INSTALL_DIR="$HOME/.admin-cli"
 
-echo "Instalando Admin-CLI desde $INSTALL_DIR..."
+GREEN="\033[32m"
+YELLOW="\033[33m"
+CYAN="\033[36m"
+RED="\033[31m"
+BOLD="\033[1m"
+NC="\033[0m"
 
+# ── Detectar shell config ──
 SHELL_CFG=""
-if [[ "$SHELL" == *"zsh"* ]]; then 
+if [[ "$SHELL" == *"zsh"* ]]; then
     SHELL_CFG="$HOME/.zshrc"
-elif [[ "$SHELL" == *"bash"* ]]; then 
+elif [[ "$SHELL" == *"bash"* ]]; then
     SHELL_CFG="$HOME/.bashrc"
 fi
 
 if [ -z "$SHELL_CFG" ]; then
-    echo "No se pudo detectar el archivo de configuración de la shell (bash/zsh)."
-    echo "Por favor, añade manualmente:"
-    echo "export PATH=\"$BIN_DIR:$PATH\""
-    echo "alias admin='$ADMIN_SCRIPT'"
+    echo -e "${RED}No se detectó bash ni zsh.${NC}"
+    echo "Agrega manualmente a tu shell:"
+    echo "  export PATH=\"$INSTALL_DIR/bin:\$PATH\""
+    echo "  alias admin='$INSTALL_DIR/admin.sh'"
     exit 1
 fi
 
-# 1. Añadir bin/ al PATH
-if ! grep -q "$BIN_DIR" "$SHELL_CFG"; then
-    echo "" >> "$SHELL_CFG"
-    echo "# ADMIN-CLI PATH" >> "$SHELL_CFG"
-    echo "export PATH=\"$BIN_DIR:$PATH\"" >> "$SHELL_CFG"
-    echo "✅ Agregado $BIN_DIR al PATH."
+echo -e ""
+echo -e "${BOLD}${CYAN}  ADMIN-CLI Installer${NC}"
+echo -e "${CYAN}  ─────────────────────────────────${NC}"
+echo -e ""
+
+# ── 1. Clonar o actualizar el repo ──
+if [ -d "$INSTALL_DIR/.git" ]; then
+    echo -e "${BOLD}[1/3]${NC} Actualizando desde GitHub..."
+    cd "$INSTALL_DIR"
+    git pull --ff-only 2>&1 | while read -r line; do
+        echo -e "  ${CYAN}$line${NC}"
+    done
 else
-    echo "ℹ️  El PATH ya está configurado."
+    echo -e "${BOLD}[1/3]${NC} Clonando repositorio..."
+
+    # Si estamos dentro de un repo clonado, mover en vez de re-clonar
+    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
+    if [ -f "$SCRIPT_DIR/admin.sh" ] && [ -d "$SCRIPT_DIR/bin" ]; then
+        if [ "$SCRIPT_DIR" != "$INSTALL_DIR" ]; then
+            echo -e "  Moviendo desde ${CYAN}$SCRIPT_DIR${NC}"
+            # Copiar todo al destino
+            mkdir -p "$INSTALL_DIR"
+            cp -a "$SCRIPT_DIR/." "$INSTALL_DIR/"
+        else
+            echo -e "  ${GREEN}Ya está en la ubicación correcta.${NC}"
+        fi
+    else
+        # Instalación online: clonar
+        if ! command -v git &>/dev/null; then
+            echo -e "${RED}Error: git no está instalado.${NC}"
+            echo "Instala con: sudo pacman -S git"
+            exit 1
+        fi
+        git clone "$REPO_URL" "$INSTALL_DIR" 2>&1 | while read -r line; do
+            echo -e "  ${CYAN}$line${NC}"
+        done
+    fi
 fi
 
-# 2. Alias para admin
-if ! grep -q "alias admin=" "$SHELL_CFG"; then
-    echo "alias admin='$ADMIN_SCRIPT'" >> "$SHELL_CFG"
-    echo "✅ Alias 'admin' creado."
-else
-    echo "ℹ️  El alias 'admin' ya existe."
+# ── 2. Permisos ──
+echo -e "${BOLD}[2/3]${NC} Configurando permisos..."
+chmod +x "$INSTALL_DIR/admin.sh"
+chmod +x "$INSTALL_DIR/bin/"*
+
+# ── 3. Configurar shell ──
+echo -e "${BOLD}[3/3]${NC} Configurando $SHELL_CFG..."
+
+# Limpiar instalaciones previas (rutas viejas)
+if grep -q "ADMIN-CLI" "$SHELL_CFG" 2>/dev/null; then
+    # Eliminar bloque viejo de ADMIN-CLI
+    sed -i '/# ADMIN-CLI/d' "$SHELL_CFG"
+    sed -i "\|admin-cli_archlinux/bin|d" "$SHELL_CFG"
+    sed -i "\|\.admin-cli/bin|d" "$SHELL_CFG"
+    sed -i "/alias admin=/d" "$SHELL_CFG"
+    sed -i "/alias admin-update=/d" "$SHELL_CFG"
+    # Limpiar lineas vacias consecutivas que queden
+    sed -i '/^$/N;/^\n$/d' "$SHELL_CFG"
+    echo -e "  ${YELLOW}Limpiada instalación anterior.${NC}"
 fi
 
-# 3. Permisos de ejecución
-chmod +x "$ADMIN_SCRIPT"
-chmod +x "$BIN_DIR"/*
+# Agregar bloque nuevo
+cat >> "$SHELL_CFG" << 'SHELLBLOCK'
 
-echo "¡Instalación completa! 🚀"
-echo "Ejecuta 'source $SHELL_CFG' o reinicia la terminal para usar:"
-echo "  - admin (Menú principal)"
-echo "  - cpu, net, procs... (Comandos directos)"
+# ADMIN-CLI
+export PATH="$HOME/.admin-cli/bin:$PATH"
+alias admin='$HOME/.admin-cli/admin.sh'
+alias admin-update='cd $HOME/.admin-cli && git pull && echo "Admin-CLI actualizado."'
+SHELLBLOCK
+
+echo -e "  ${GREEN}PATH, alias 'admin' y 'admin-update' configurados.${NC}"
+
+# ── Resultado ──
+echo -e ""
+echo -e "${GREEN}${BOLD}  Instalación completa.${NC}"
+echo -e ""
+echo -e "  Ejecuta: ${BOLD}source $SHELL_CFG${NC}"
+echo -e "  Luego:   ${BOLD}admin${NC}"
+echo -e ""
+echo -e "  Comandos disponibles:"
+echo -e "    ${CYAN}admin${NC}          Menu principal"
+echo -e "    ${CYAN}admin-update${NC}   Actualizar desde GitHub"
+echo -e "    ${CYAN}cpu, net, hdw, procs, dock, deps...${NC}  Herramientas directas"
+echo -e ""
