@@ -33,6 +33,7 @@ IP Publica:  xxx.xxx.xxx.xxx
   [3] HARDWARE            (Discos, USB, Sensores)
   [4] DOCKER MANAGER      (Contenedores, Logs, Shell)
   [5] PROYECTOS           (Repos Git, Pull Masivo, Config Rutas)
+  [6] DEPENDENCIAS        (Limpiar node_modules, target/, venv)
   ──────────────────────────────────────────────────────
   [u] UPDATE SYSTEM       (Actualizar: Pacman/Yay)
   [c] CLEAN SYSTEM        (Limpiar Cache/Huerfanos)
@@ -104,22 +105,21 @@ Escanea tus carpetas de proyectos y muestra el estado git de cada repo (limpio /
 - Sub-shell directa en cualquier proyecto
 - Agregar/eliminar directorios en cualquier momento con `[d]`
 
-### Limpiador de Dependencias — `gestionar_proyectos.sh`
+### Dependencias — `deps`
 
-Herramienta avanzada para liberar espacio en disco analizando proyectos de desarrollo:
+Gestor de dependencias integrado que **lee las mismas rutas** de `projects.conf`:
 
-- **Detecta automaticamente** todos los proyectos en tu carpeta
 - Escanea `node_modules/`, `target/` (Rust), `dist/`, `.next/`, `.nuxt/`, `venv/`
-- Muestra tabla con espacio recuperable por proyecto y tipo
-- **Verifica git antes de limpiar** — bloquea limpieza si hay cambios sin commitear
-- Opciones para auto-commit con IA (Claude/Gemini) o stash antes de limpiar
-- Inicializar git y crear repos en GitHub desde el mismo menu
-- Ofrece migrar de npm a pnpm para ahorrar espacio
-- Configura `CARGO_TARGET_DIR` compartido para proyectos Rust/Tauri
-- Lanza proyectos (dev server) tras instalar dependencias
+- Tabla con espacio recuperable por proyecto y tipo
+- **Verifica git antes de limpiar** — bloquea si hay cambios sin commitear
+- Auto-commit con IA (Claude/Gemini) o stash antes de limpiar
+- Inicializar git y crear repos en GitHub
+- Migrar de npm a pnpm para ahorrar espacio
+- Configurar `CARGO_TARGET_DIR` compartido para Rust/Tauri
+- Activar proyectos (instalar deps) y lanzar dev servers
 
 ```bash
-./gestionar_proyectos.sh
+deps   # Tambien funciona como comando independiente
 ```
 
 ### Backup & Migracion — `bak`
@@ -178,7 +178,6 @@ Configura **Chaotic-AUR** automaticamente para binarios pre-compilados.
 admin-cli-archlinux/
 ├── admin.sh                    # Entry point — menu principal con dashboard
 ├── install.sh                  # Instalador (PATH + alias)
-├── gestionar_proyectos.sh      # Limpiador de dependencias de proyectos
 ├── config/
 │   └── colors.theme            # Paleta de colores centralizada
 ├── lib/
@@ -192,6 +191,7 @@ admin-cli-archlinux/
     ├── hdw                     # Inspector de hardware
     ├── dock                    # Docker manager
     ├── git-tool                # Gestor de proyectos Git
+    ├── deps                    # Gestor de dependencias
     ├── bak                     # Backup y migracion
     ├── software                # Centro de software
     ├── printer                 # Impresoras Epson

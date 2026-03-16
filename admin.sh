@@ -62,6 +62,7 @@ while true; do
     echo -e "  ${CYAN}[3]${NC} ${BOLD}HARDWARE${NC}            (Discos, USB, Sensores)"
     echo -e "  ${CYAN}[4]${NC} ${BOLD}DOCKER MANAGER${NC}      (Contenedores, Logs, Shell)"
     echo -e "  ${CYAN}[5]${NC} ${BOLD}PROYECTOS${NC}           (Repos Git, Pull Masivo, Config Rutas)"
+    echo -e "  ${CYAN}[6]${NC} ${BOLD}DEPENDENCIAS${NC}        (Limpiar node_modules, target/, venv)"
 
     echo -e "${BLUE}  ──────────────────────────────────────────────────────${NC}"
     
@@ -108,6 +109,7 @@ while true; do
         3) bash "$ADMIN_CLI_ROOT/bin/hdw" ; pause ;;
         4) bash "$ADMIN_CLI_ROOT/bin/dock" ;;
         5) bash "$ADMIN_CLI_ROOT/bin/git-tool" ;;
+        6) bash "$ADMIN_CLI_ROOT/bin/deps" ;;
         
         u|U) system_update ;;
         c|C) system_clean ;;
