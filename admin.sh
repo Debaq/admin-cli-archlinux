@@ -61,7 +61,7 @@ while true; do
     echo -e "  ${CYAN}[2]${NC} ${BOLD}PROCESOS${NC}            (Top CPU/RAM, Kill, Buscar)"
     echo -e "  ${CYAN}[3]${NC} ${BOLD}HARDWARE${NC}            (Discos, USB, Sensores)"
     echo -e "  ${CYAN}[4]${NC} ${BOLD}DOCKER MANAGER${NC}      (Contenedores, Logs, Shell)"
-    echo -e "  ${CYAN}[5]${NC} ${BOLD}GIT PROJECTS${NC}        (Estado Repos, Pull Masivo)"
+    echo -e "  ${CYAN}[5]${NC} ${BOLD}PROYECTOS${NC}           (Repos Git, Pull Masivo, Config Rutas)"
 
     echo -e "${BLUE}  ──────────────────────────────────────────────────────${NC}"
     
