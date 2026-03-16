@@ -1,0 +1,122 @@
+#!/bin/bash
+BASE_DIR=$(dirname "$(dirname "$(readlink -f "$0")")")
+source "$BASE_DIR/lib/utils.sh"
+
+clear
+echo -e "${BLUE}${BOLD}==================================================${NC}"
+echo -e "           ${CYAN}${BOLD}GESTOR DE PERMISOS & USUARIOS${NC}"
+echo -e "${BLUE}${BOLD}==================================================${NC}"
+
+# --- INFO USUARIO ---
+CURRENT_USER=$(whoami)
+USER_GROUPS=$(groups)
+
+echo -e "${BOLD}Usuario:${NC} $CURRENT_USER"
+echo -e "${BOLD}Grupos actuales:${NC}"
+echo -e "   $USER_GROUPS" | fold -s -w 60 | sed 's/^/   /'
+
+echo -e "${BLUE}--------------------------------------------------${NC}"
+echo -e "Selecciona una acción:"
+echo -e "  [${BOLD}1${NC}] 🔧 Reparar permisos ${BOLD}SERIAL / ARDUINO${NC} (uucp/dialout)"
+echo -e "  [${BOLD}2${NC}] 👤 ${BOLD}Hacer mío${NC} este directorio (Fix 'Permission Denied')"
+echo -e "  [${BOLD}3${NC}] 🚀 Hacer un archivo ${BOLD}Ejecutable${NC} (+x)"
+echo -e "  [${BOLD}4${NC}] 🔍 ${BOLD}Ver permisos${NC} de un archivo/carpeta"
+echo -e "  [${BOLD}q${NC}] Salir"
+echo -e ""
+echo -ne "${BOLD}Opción > ${NC}"
+read -r OPT
+
+case $OPT in
+    1)
+        echo -e "\n${YELLOW}--- ANALIZANDO GRUPOS NECESARIOS ---${NC}"
+        # Lista de grupos comunes para hardware en Linux
+        # uucp/lock = Arch Linux Serial
+        # dialout = Debian/Ubuntu Serial
+        # tty = Acceso terminal genérico
+        TARGET_GROUPS=("uucp" "dialout" "lock" "tty" "input")
+        CHANGED=0
+
+        for G in "${TARGET_GROUPS[@]}"; do
+            # Verificar si el grupo existe en el sistema (/etc/group)
+            if grep -q "^$G:" /etc/group; then
+                # Verificar si el usuario YA está en el grupo
+                if [[ " $USER_GROUPS " =~ " $G " ]]; then
+                    echo -e "✅ Ya estás en ${GREEN}$G${NC}"
+                else
+                    echo -e "❌ Faltas en ${RED}$G${NC}. Agregando..."
+                    sudo usermod -aG "$G" "$CURRENT_USER"
+                    echo -e "   -> Agregado a $G."
+                    CHANGED=1
+                fi
+            else
+                # Grupo no existe en esta distro (normal, uucp es Arch, dialout es Debian)
+                echo -e "⚪ El grupo '$G' no se usa en este sistema (ignorado)."
+            fi
+        done
+
+        echo -e "${BLUE}--------------------------------------------------${NC}"
+        if [ $CHANGED -eq 1 ]; then
+            echo -e "${RED}${BOLD}⚠️  ¡IMPORTANTE! ⚠️${NC}"
+            echo -e "Has sido agregado a nuevos grupos."
+            echo -e "Debes ${BOLD}CERRAR SESIÓN y volver a entrar${BOLD} (o reiniciar)"
+            echo -e "para que los cambios surtan efecto y puedas usar el puerto Serial."
+        else
+            echo -e "Tu usuario ya tiene todos los permisos de hardware necesarios."
+        fi
+        ;;
+
+    2)
+        DIR=$(pwd)
+        echo -e "\n${YELLOW}--- RECUPERAR PROPIEDAD ---${NC}"
+        echo -e "Esto asignará todos los archivos en:"
+        echo -e "  ${CYAN}$DIR${NC}"
+        echo -e "al usuario ${BOLD}$CURRENT_USER${NC}."
+        echo -e "Útil si copiaste archivos con sudo o desde otro PC."
+        echo -ne "¿Proceder? [s/N]: "
+        read -r CONFIRM
+        if [[ "$CONFIRM" =~ ^[sS]$ ]]; then
+            echo "Aplicando chown recursivo..."
+            sudo chown -R "$CURRENT_USER":"$CURRENT_USER" .
+            echo -e "${GREEN}✅ ¡Listo! Ahora eres el dueño de todo aquí.${NC}"
+        else
+            echo "Cancelado."
+        fi
+        ;;
+
+    3)
+        echo -e "\n${YELLOW}--- HACER EJECUTABLE ---${NC}"
+        echo -e "Archivos en este directorio:"
+        ls -p | grep -v / | column
+        echo -ne "\nEscribe el nombre del archivo: "
+        read -r FILE
+        if [ -f "$FILE" ]; then
+            chmod +x "$FILE"
+            echo -e "${GREEN}✅ $FILE ahora es ejecutable.${NC}"
+        else
+            echo -e "${RED}El archivo no existe.${NC}"
+        fi
+        ;;
+
+    4)
+        echo -e "\n${YELLOW}--- INSPECTOR DE PERMISOS ---${NC}"
+        echo -ne "Ruta (Enter para actual): "
+        read -r PATH_CHECK
+        if [ -z "$PATH_CHECK" ]; then PATH_CHECK="."; fi
+        
+        if [ -e "$PATH_CHECK" ]; then
+            ls -ldh "$PATH_CHECK"
+            echo -e "\nLeyenda: ${BOLD}r${NC}=leer, ${BOLD}w${NC}=escribir, ${BOLD}x${NC}=ejecutar"
+            echo -e "Orden:   [Usuario Dueño] [Grupo] [Otros]"
+        else
+            echo -e "${RED}Ruta no válida.${NC}"
+        fi
+        ;;
+
+    q|Q)
+        echo "Bye!"
+        exit 0
+        ;;
+    *)
+        echo "Opción no válida."
+        ;;
+esac

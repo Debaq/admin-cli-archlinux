@@ -1,0 +1,134 @@
+#!/bin/bash
+BASE_DIR=$(dirname "$(dirname "$(readlink -f "$0")")")
+source "$BASE_DIR/lib/utils.sh"
+check_sudo
+
+BOLD="\033[1m"
+NC="\033[0m"
+CLR_EOL="\033[K" # Limpiar hasta el final de la línea
+
+# Solo limpiar si NO estamos en modo dashboard
+if [ "$1" != "dashboard" ]; then
+    clear
+fi
+
+echo -e "${BLUE}${BOLD}==================================================${NC}${CLR_EOL}"
+echo -e "           ${YELLOW}${BOLD}PANEL DE CONTROL: CPU & SISTEMA${NC}${CLR_EOL}"
+echo -e "${BLUE}${BOLD}==================================================${NC}${CLR_EOL}"
+
+# --- HARDWARE ---
+MODEL=$(grep "model name" /proc/cpuinfo | head -1 | cut -d ":" -f 2 | sed "s/^ //")
+CORES=$(nproc)
+echo -e "${BOLD}Modelo:${NC}      $MODEL${CLR_EOL}"
+echo -e "${BOLD}Núcleos:${NC}     $CORES Hilos${CLR_EOL}"
+
+# --- ENERGÍA ---
+AC_ONLINE=$(cat /sys/class/power_supply/AC/online 2>/dev/null)
+GOV=$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2>/dev/null)
+if [ "$AC_ONLINE" == "1" ]; then POWER="${GREEN}⚡ CONECTADO${NC}"; else POWER="${YELLOW}🔋 BATERÍA${NC}"; fi
+if [ "$GOV" == "performance" ]; then GOV_DSP="${GREEN}${BOLD}$GOV${NC}"; else GOV_DSP="${BLUE}$GOV${NC}"; fi
+echo -e "${BOLD}Energía:${NC}     $POWER  |  ${BOLD}Gob:${NC} $GOV_DSP${CLR_EOL}"
+
+# --- SENSORES & RAM ---
+TEMP=$(sudo sensors 2>/dev/null | grep -E "Tctl|Package|edge" | head -1 | awk '{print $2}')
+if [ -z "$TEMP" ]; then TEMP="${RED}N/A${NC}"; else TEMP="${RED}${BOLD}$TEMP${NC}"; fi
+MEM=$(free -h | grep Mem | awk '{print $3 " / " $2}')
+echo -e "${BOLD}Temp:${NC}        $TEMP   |  ${BOLD}RAM:${NC} $MEM${CLR_EOL}"
+
+# --- RED (IPs) ---
+IFACE=$(ip route | grep default | awk '{print $5}' | head -1)
+LOCAL_IP=$(ip -4 addr show "$IFACE" | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | head -1)
+PUB_IP_FILE="/tmp/admin_pub_ip"
+if [ ! -f "$PUB_IP_FILE" ] || [ $(find "$PUB_IP_FILE" -mmin +60 2>/dev/null) ]; then
+    (curl -s --max-time 1 https://ifconfig.me > "$PUB_IP_FILE" 2>/dev/null &)
+fi
+PUB_IP=$(cat "$PUB_IP_FILE" 2>/dev/null || echo "Detectando...")
+echo -e "${BOLD}IP Local:${NC}    ${CYAN}$LOCAL_IP${NC} ($IFACE)${CLR_EOL}"
+echo -e "${BOLD}IP Pública:${NC}  ${MAGENTA}$PUB_IP${NC}${CLR_EOL}"
+
+echo -e "${BLUE}--------------------------------------------------${NC}${CLR_EOL}"
+echo -e "           ${BOLD}FRECUENCIAS EN TIEMPO REAL${NC}${CLR_EOL}"
+echo -e "${BLUE}--------------------------------------------------${NC}${CLR_EOL}"
+grep "cpu MHz" /proc/cpuinfo | awk -v g="$GREEN" -v n="$NC" -v k="$CLR_EOL" '{printf "Núcleo %02d: %s%8.2f MHz%s%s\n", NR-1, g, $4, n, k}' | pr -2 -t -w 80
+
+echo -e "${BLUE}${BOLD}==================================================${NC}${CLR_EOL}"
+echo -e "         ${RED}${BOLD}🚨 DETECTIVE DE PROCESOS${NC}${CLR_EOL}"
+echo -e "${BLUE}${BOLD}==================================================${NC}${CLR_EOL}"
+
+# Guardamos la salida de ps
+PS_OUTPUT=$(ps -eo pid,state,%cpu,%mem,comm --sort=-%cpu)
+
+# Mostrar la tabla de procesos con altura fija de 6 líneas (Cabecera + 5 Datos)
+echo "$PS_OUTPUT" | awk -v red="$RED" -v yel="$YELLOW" -v nc="$NC" -v bold="$BOLD" -v cyn="$CYAN" -v k="$CLR_EOL" \
+' \
+BEGIN { 
+    count=0; 
+    max_show=5;
+    printf "% -8s % -15s % -20s %s%s\n", "PID", "TIPO", "PROCESO", "CONSUMO", k 
+}
+# Filtrar críticos
+($2 ~ /^Z/ || $3 > 40.0 || $4 > 10.0) && $5 != "ps" && $5 != "awk" {
+    count++;
+    if (count <= max_show) {
+        type = "🔥 ALTO CPU";
+        if ($2 ~ /^Z/) type = "🧟 ZOMBIE";
+        else if ($4 > 10.0) type = "💾 ALTA RAM";
+        color = ($2 ~ /^Z/ ? red : yel);
+        printf "% -8s %s%-15s%s % -20s %s%s\n", $1, color, type, nc, substr($5,1,19), ($2 ~ /^Z/ ? "---" : $3"%"), k;
+    }
+}
+END { 
+    if (count == 0) { 
+        printf "✨ %sTodo limpio:%s Sin procesos críticos.%s\n", bold, nc, k;
+        for (i=1; i<max_show; i++) printf "%s\n", k;
+    } else {
+        if (count > max_show) {
+            printf "%s... y %d procesos más.%s%s\n", cyn, count - max_show, nc, k;
+        } else {
+            for (i=count; i<max_show; i++) printf "%s\n", k;
+        }
+    }
+}
+'
+
+echo -e "${BLUE}--------------------------------------------------${NC}${CLR_EOL}"
+
+# ==========================================
+if [ "$1" == "dashboard" ]; then
+    exit 0
+fi
+
+# 3. MÓDULO INTERACTIVO "TERMINATOR"
+# ... (el resto del código de cpu sigue igual)
+echo -e "Escribe el ${BOLD}PID${NC} para matar un proceso (o pulsa ${BOLD}Enter${NC} para salir):"
+read -r TARGET_PID
+
+if [[ -n "$TARGET_PID" ]]; then
+    if ! [[ "$TARGET_PID" =~ ^[0-9]+$ ]]; then
+        echo -e "${RED}Error: El PID debe ser un número.${NC}"
+        exit 1
+    fi
+    if ! ps -p "$TARGET_PID" > /dev/null; then
+        echo -e "${RED}El PID $TARGET_PID no existe.${NC}"
+        exit 1
+    fi
+    NAME=$(ps -p "$TARGET_PID" -o comm=)
+    echo -e "Intentando detener ${BOLD}$NAME${NC} ($TARGET_PID) suavemente..."
+    sudo kill -15 "$TARGET_PID" 2>/dev/null
+    sleep 1
+    if ps -p "$TARGET_PID" > /dev/null; then
+        echo -e "${RED}⚠️  El proceso resiste.${NC}"
+        echo -e "¿Quieres usar ${RED}${BOLD}FUERZA LETAL (KILL -9)${NC}? [s/N]"
+        read -r FORCE
+        if [[ "$FORCE" =~ ^[sS]$ ]]; then
+            sudo kill -9 "$TARGET_PID"
+            echo -e "${RED}💀 Proceso $NAME ($TARGET_PID) aniquilado.${NC}"
+        else
+            echo "Operación cancelada. El proceso sigue vivo."
+        fi
+    else
+        echo -e "${GREEN}✅ Proceso detenido correctamente.${NC}"
+    fi
+else
+    echo "👋 ¡Hasta luego!"
+fi

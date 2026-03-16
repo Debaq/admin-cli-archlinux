@@ -1,0 +1,90 @@
+#!/bin/bash
+BASE_DIR=$(dirname "$(dirname "$(readlink -f "$0")")")
+source "$BASE_DIR/lib/utils.sh"
+
+clear
+echo -e "${BLUE}${BOLD}==================================================${NC}"
+echo -e "           ${RED}${BOLD}REPARADOR DE ARCH / PACMAN${NC}"
+echo -e "${BLUE}${BOLD}==================================================${NC}"
+
+echo -e "  [${BOLD}1${NC}] 🚑 ${BOLD}Reparar LLAVES PGP / Firmas Inválidas${NC}"
+echo -e "         (Úsalo si llevas mucho tiempo sin actualizar)"
+echo -e "  [${BOLD}2${NC}] 📦 ${BOLD}Instalar YAY${NC} (AUR Helper)"
+echo -e "  [${BOLD}3${NC}] ⚡ ${BOLD}Optimizar Espejos${NC} (Reflector)"
+echo -e "  [${BOLD}4${NC}] 🔓 ${BOLD}Eliminar 'db.lck'${NC} (Bloqueo de base de datos)"
+echo -e "  [${BOLD}q${NC}] Salir"
+echo -e ""
+echo -ne "${BOLD}Opción > ${NC}"
+read -r OPT
+
+case $OPT in
+    1)
+        echo -e "\n${YELLOW}--- INICIANDO PROTOCOLO DE RESCATE DE LLAVES ---${NC}"
+        echo -e "1. Borrando bloqueo..."
+        sudo rm -f /var/lib/pacman/db.lck
+        
+        echo -e "2. Reinicializando llavero (pacman-key)..."
+        sudo pacman-key --init
+        
+        echo -e "3. Poblando llaves (Arch + Endeavour)..."
+        sudo pacman-key --populate archlinux endeavouros
+        
+        echo -e "4. Limpiando caché de paquetes corruptos..."
+        sudo pacman -Sc --noconfirm
+        
+        echo -e "5. ${BOLD}Forzando actualización de archlinux-keyring...${NC}"
+        # Truco: Actualizar SOLO el keyring primero ignorando dependencias si es necesario
+        sudo pacman -Sy --noconfirm archlinux-keyring endeavouros-keyring
+        
+        echo -e "${GREEN}✅ ¡Proceso terminado! Ahora intenta actualizar tu sistema.${NC}"
+        ;;
+    
+    2)
+        echo -e "\n${YELLOW}--- INSTALADOR DE YAY ---${NC}"
+        if command -v yay &> /dev/null; then
+            echo -e "${GREEN}yay ya está instalado.${NC}"
+        else
+            echo -e "Instalando dependencias (git, base-devel)..."
+            sudo pacman -S --needed --noconfirm git base-devel
+            
+            echo -e "Clonando repositorio..."
+            cd /tmp
+            rm -rf yay
+            git clone https://aur.archlinux.org/yay.git
+            cd yay
+            
+            echo -e "Compilando..."
+            makepkg -si --noconfirm
+            
+            echo -e "${GREEN}✅ yay instalado correctamente.${NC}"
+        fi
+        ;;
+
+    3)
+        echo -e "\n${YELLOW}--- OPTIMIZANDO ESPEJOS ---${NC}"
+        if command -v reflector &> /dev/null; then
+            echo -e "Buscando los 10 espejos más rápidos (HTTPS)..."
+            sudo reflector --verbose --latest 10 --protocol https --sort rate --save /etc/pacman.d/mirrorlist
+            echo -e "${GREEN}✅ Lista de espejos actualizada.${NC}"
+        else
+            echo -e "${RED}Error: 'reflector' no está instalado.${NC}"
+            echo -e "Instálalo con: sudo pacman -S reflector"
+        fi
+        ;;
+
+    4)
+        echo -e "\nEliminando /var/lib/pacman/db.lck..."
+        sudo rm -v /var/lib/pacman/db.lck
+        echo -e "${GREEN}✅ Desbloqueado.${NC}"
+        ;;
+
+    q|Q)
+        exit 0
+        ;;
+    *)
+        echo "Opción inválida."
+        ;;
+esac
+
+echo -e "\nPresiona Enter para continuar..."
+read -r

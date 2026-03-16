@@ -1,0 +1,83 @@
+#!/bin/bash
+BASE_DIR=$(dirname "$(dirname "$(readlink -f "$0")")")
+source "$BASE_DIR/lib/utils.sh"
+
+print_header "PREPARACIÓN BÁSICA DEL SISTEMA"
+
+echo -e "Este script realizará las siguientes tareas:"
+echo -e "  1. Configurar ${MAGENTA}Chaotic-AUR${NC} (Repositorio de binarios pre-compilados)"
+echo -e "  2. Instalar ${CYAN}Micromamba${NC} (Gestor de entornos)"
+echo -e "  3. Instalar ${CYAN}Apps Base:${NC} Brave, Gimp, Inkscape, Blender, Balena Etcher"
+echo -e ""
+echo -ne "${YELLOW}${BOLD}¿Deseas continuar? [s/N]: ${NC}"
+read -r CONFIRM
+
+if [[ ! "$CONFIRM" =~ ^[sS]$ ]]; then
+    echo "Operación cancelada."
+    exit 0
+fi
+
+check_sudo
+
+# 1. CHAOTIC-AUR (Lo hacemos primero para aprovechar los binarios)
+echo -e "\n${BLUE}${BOLD}>>> Configurando Chaotic-AUR...${NC}"
+if grep -q "\[chaotic-aur\]" /etc/pacman.conf; then
+    echo -e "${GREEN}Chaotic-AUR ya está configurado.${NC}"
+else
+    echo -e "Importando llaves..."
+    sudo pacman-key --recv-key 3056513887B78AEB --keyserver keyserver.ubuntu.com
+    sudo pacman-key --lsign-key 3056513887B78AEB
+    
+    echo -e "Instalando keyring y mirrorlist..."
+    sudo pacman -U --noconfirm 'https://cdn-mirror.chaotic.cx/chaotic-aur/chaotic-keyring.pkg.tar.zst'
+    sudo pacman -U --noconfirm 'https://cdn-mirror.chaotic.cx/chaotic-aur/chaotic-mirrorlist.pkg.tar.zst'
+    
+    echo -e "Añadiendo repositorio a pacman.conf..."
+    echo "" | sudo tee -a /etc/pacman.conf
+    echo "[chaotic-aur]" | sudo tee -a /etc/pacman.conf
+    echo "Include = /etc/pacman.d/chaotic-mirrorlist" | sudo tee -a /etc/pacman.conf
+    
+    echo -e "Actualizando bases de datos..."
+    sudo pacman -Sy
+    echo -e "${GREEN}✅ Chaotic-AUR activado.${NC}"
+fi
+
+# 2. INSTALACIÓN DE MICROMAMBA
+echo -e "\n${BLUE}${BOLD}>>> Instalando Micromamba...${NC}"
+if command -v micromamba &> /dev/null; then
+    echo -e "${GREEN}Micromamba ya está instalado.${NC}"
+else
+    # Ejecuta el instalador oficial detectando la shell actual
+    "${SHELL}" <(curl -L micro.mamba.pm/install.sh)
+    echo -e "${GREEN}✅ Micromamba instalado. (Reinicia tu shell para usarlo)${NC}"
+fi
+
+# 3. INSTALACIÓN DE PAQUETES
+echo -e "\n${BLUE}${BOLD}>>> Instalando Aplicaciones...${NC}"
+
+# Definir paquetes
+PKGS_PACMAN="gimp inkscape blender"
+PKGS_AUR="balena-etcher brave-bin" 
+
+echo -e "Instalando paquetes básicos (${PKGS_PACMAN})..."
+sudo pacman -S --needed --noconfirm $PKGS_PACMAN
+
+echo -e "Instalando paquetes externos (${PKGS_AUR})..."
+# Intentamos instalar desde Chaotic-AUR (pacman) primero
+if sudo pacman -S --needed --noconfirm $PKGS_AUR; then
+    echo -e "${GREEN}✅ Apps instaladas desde repositorios (Probablemente Chaotic-AUR).${NC}"
+else
+    echo -e "${YELLOW}No se encontraron en repositorios binarios. Intentando compilar con AUR Helper...${NC}"
+    if command -v yay &> /dev/null;
+        then
+            yay -S --needed --noconfirm $PKGS_AUR
+        elif command -v paru &> /dev/null;
+        then
+            paru -S --needed --noconfirm $PKGS_AUR
+        else
+            echo -e "${RED}Error: No se pudieron instalar $PKGS_AUR (No tienes yay/paru y falló pacman).${NC}"
+    fi
+fi
+
+echo -e "\n${GREEN}${BOLD}¡Setup completado!${NC}"
+pause

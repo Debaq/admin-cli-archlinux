@@ -1,0 +1,59 @@
+#!/bin/bash
+BASE_DIR=$(dirname "$(dirname "$(readlink -f "$0")")")
+source "$BASE_DIR/lib/utils.sh"
+
+clear
+echo -e "${BLUE}${BOLD}==================================================${NC}"
+echo -e "           ${MAGENTA}${BOLD}INSPECTOR DE HARDWARE (HDW)${NC}"
+echo -e "${BLUE}${BOLD}==================================================${NC}"
+
+# --- SECCIÓN 1: ALMACENAMIENTO (DISCOS) ---
+echo -e "${YELLOW}${BOLD}💾 ALMACENAMIENTO (Discos y Particiones)${NC}"
+# lsblk con columnas específicas: Nombre, Tamaño, Tipo FS, Montaje
+lsblk -o NAME,SIZE,FSTYPE,MOUNTPOINT | grep -v "loop" | awk 'NR==1 {print $0; next} {print $0}' 
+
+echo -e "${BLUE}--------------------------------------------------${NC}"
+
+# --- SECCIÓN 2: PUERTOS TTY / SERIAL (ARDUINO/ESP) ---
+echo -e "${YELLOW}${BOLD}📠 PUERTOS SERIAL / TTY (Dev)${NC}"
+# Buscamos ttyUSB y ttyACM que son los clásicos de microcontroladores
+SERIALS=$(ls /dev/ttyUSB* /dev/ttyACM* 2>/dev/null)
+
+if [ -z "$SERIALS" ]; then
+    echo -e "   (No se detectan dispositivos serie activos)"
+else
+    for dev in $SERIALS; do
+        echo -e "   ${GREEN}🟢 CONECTADO:${NC} $dev"
+    done
+fi
+
+echo -e "${BLUE}--------------------------------------------------${NC}"
+
+# --- SECCIÓN 3: USB CONECTADOS ---
+echo -e "${YELLOW}${BOLD}🔌 DISPOSITIVOS USB${NC}"
+# lsusb simple pero limpio
+lsusb | cut -d ' ' -f 6- | sed "s/^/   - /"
+
+echo -e "${BLUE}--------------------------------------------------${NC}"
+
+# --- SECCIÓN 4: VIDEO Y GRÁFICOS ---
+echo -e "${YELLOW}${BOLD}📷 VIDEO & GRÁFICOS${NC}"
+# Gráfica (GPU)
+GPU=$(lspci | grep -i "vga\|3d" | cut -d ':' -f 3 | sed "s/^ //")
+echo -e "   ${BOLD}GPU:${NC} $GPU"
+
+# Webcams (Dispositivos de video)
+VIDEOS=$(ls /dev/video* 2>/dev/null)
+if [ -n "$VIDEOS" ]; then
+    echo -e "   ${BOLD}Cámaras/Entradas:${NC}"
+    # Intentamos listar nombres reales si v4l2-ctl existe, si no, solo los paths
+    if command -v v4l2-ctl >/dev/null 2>&1; then
+        v4l2-ctl --list-devices | sed "s/^/      /"
+    else
+        echo "$VIDEOS" | sed "s/^/      - /"
+    fi
+else
+    echo -e "   (Sin cámaras detectadas)"
+fi
+
+echo -e "${BLUE}${BOLD}==================================================${NC}"

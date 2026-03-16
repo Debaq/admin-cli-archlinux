@@ -1,0 +1,181 @@
+#!/bin/bash
+BASE_DIR=$(dirname "$(dirname "$(readlink -f "$0")")")
+source "$BASE_DIR/lib/utils.sh"
+
+# Directorio de salida por defecto
+BACKUP_ROOT="$HOME/Backups_AdminCLI"
+DATE=$(date +%Y-%m-%d_%H-%M)
+ARCHIVE_NAME="migration_pack_$DATE.tar.gz"
+
+# Función para realizar el backup
+do_backup() {
+    TEMP_DIR=$(mktemp -d)
+    echo -e "${BLUE}Creando estructura temporal en $TEMP_DIR...${NC}"
+    mkdir -p "$TEMP_DIR/home/config"
+
+    # 1. FILEZILLA
+    if [ -d "$HOME/.config/filezilla" ]; then
+        echo -e "${CYAN}Respaldando FileZilla...${NC}"
+        mkdir -p "$TEMP_DIR/home/config/filezilla"
+        cp "$HOME/.config/filezilla/sitemanager.xml" "$TEMP_DIR/home/config/filezilla/" 2>/dev/null
+        cp "$HOME/.config/filezilla/filezilla.xml" "$TEMP_DIR/home/config/filezilla/" 2>/dev/null
+    fi
+
+    # 2. BRAVE (Solo lo esencial)
+    BRAVE_PATH="$HOME/.config/BraveSoftware/Brave-Browser/Default"
+    if [ -d "$BRAVE_PATH" ]; then
+        echo -e "${CYAN}Respaldando Brave (Bookmarks, History)...${NC}"
+        mkdir -p "$TEMP_DIR/home/config/brave"
+        cp "$BRAVE_PATH/Bookmarks" "$TEMP_DIR/home/config/brave/" 2>/dev/null
+        cp "$BRAVE_PATH/History" "$TEMP_DIR/home/config/brave/" 2>/dev/null
+        cp "$BRAVE_PATH/Login Data" "$TEMP_DIR/home/config/brave/" 2>/dev/null
+        cp "$BRAVE_PATH/Web Data" "$TEMP_DIR/home/config/brave/" 2>/dev/null
+    fi
+
+    # 3. IMPRESIÓN 3D (SLICERS)
+    echo -e "${CYAN}Respaldando Perfiles de Impresión 3D...${NC}"
+    
+    # Prusa Slicer
+    if [ -d "$HOME/.config/PrusaSlicer" ]; then
+        echo -e "   ✅ Prusa Slicer"
+        cp -r "$HOME/.config/PrusaSlicer" "$TEMP_DIR/home/config/"
+    else
+        echo -e "   ⚪ Prusa Slicer (No encontrado)"
+    fi
+
+    # Orca Slicer
+    if [ -d "$HOME/.config/OrcaSlicer" ]; then
+        echo -e "   ✅ Orca Slicer"
+        cp -r "$HOME/.config/OrcaSlicer" "$TEMP_DIR/home/config/"
+    else
+        echo -e "   ⚪ Orca Slicer (No encontrado)"
+    fi
+    
+    # Bambu Studio (Por si acaso, estructura similar)
+    if [ -d "$HOME/.config/BambuStudio" ]; then
+        echo -e "   ✅ Bambu Studio"
+        cp -r "$HOME/.config/BambuStudio" "$TEMP_DIR/home/config/"
+    fi
+
+    # 4. IMPRESORAS (CUPS & HP) - Requiere SUDO
+    echo -e "${CYAN}Respaldando Configuración de Impresoras (CUPS/HP)...${NC}"
+    mkdir -p "$TEMP_DIR/etc/cups"
+    
+    sudo cp /etc/cups/printers.conf "$TEMP_DIR/etc/cups/" 2>/dev/null
+    sudo cp -r /etc/cups/ppd "$TEMP_DIR/etc/cups/" 2>/dev/null
+    
+    if [ -d "/var/lib/hp" ]; then
+        mkdir -p "$TEMP_DIR/var/lib"
+        sudo cp -r /var/lib/hp "$TEMP_DIR/var/lib/" 2>/dev/null
+    fi
+    
+    # Arreglar permisos para comprimir
+    sudo chown -R "$USER:$USER" "$TEMP_DIR"
+
+    # 5. COMPRIMIR
+    mkdir -p "$BACKUP_ROOT"
+    echo -e "${BLUE}Comprimiendo archivo...${NC}"
+    tar -czf "$BACKUP_ROOT/$ARCHIVE_NAME" -C "$TEMP_DIR" .
+    
+    rm -rf "$TEMP_DIR"
+
+    echo -e "\n${GREEN}${BOLD}✅ Backup Completado.${NC}"
+    echo -e "Archivo: ${MAGENTA}$BACKUP_ROOT/$ARCHIVE_NAME${NC}"
+    pause
+}
+
+# Función para restaurar
+do_restore() {
+    echo -e "${YELLOW}⚠️  ATENCIÓN: Esto sobrescribirá configuraciones actuales.${NC}"
+    echo -e "Buscando backups en: $BACKUP_ROOT"
+    echo -e ""
+    
+    if [ ! -d "$BACKUP_ROOT" ] || [ -z "$(ls -A "$BACKUP_ROOT")" ]; then
+        echo -e "${RED}No se encontraron backups.${NC}"
+        pause
+        return
+    fi
+
+    ls "$BACKUP_ROOT"/*.tar.gz | xargs -n 1 basename
+    echo -e ""
+    echo -ne "Nombre del archivo a restaurar: "
+    read -r FILE_NAME
+    
+    FULL_PATH="$BACKUP_ROOT/$FILE_NAME"
+    if [ ! -f "$FULL_PATH" ]; then
+        echo -e "${RED}Archivo no encontrado.${NC}"
+        pause
+        return
+    fi
+
+    TEMP_DIR=$(mktemp -d)
+    echo -e "${BLUE}Descomprimiendo...${NC}"
+    tar -xzf "$FULL_PATH" -C "$TEMP_DIR"
+
+    # 1. RESTAURAR CONFIGS USUARIO
+    echo -e "${CYAN}Restaurando Configs (Filezilla, Slicers, Browsers)...${NC}"
+    
+    # Filezilla
+    if [ -d "$TEMP_DIR/home/config/filezilla" ]; then
+        mkdir -p "$HOME/.config/filezilla"
+        cp -r "$TEMP_DIR/home/config/filezilla/"* "$HOME/.config/filezilla/"
+    fi
+    
+    # Brave
+    if [ -d "$TEMP_DIR/home/config/brave" ]; then
+        BRAVE_DEST="$HOME/.config/BraveSoftware/Brave-Browser/Default"
+        mkdir -p "$BRAVE_DEST"
+        cp -r "$TEMP_DIR/home/config/brave/"* "$BRAVE_DEST/"
+    fi
+    
+    # Slicers (Sobrescribe carpetas completas en .config)
+    if [ -d "$TEMP_DIR/home/config/PrusaSlicer" ]; then
+        echo -e "   -> Restaurando Prusa Slicer..."
+        cp -r "$TEMP_DIR/home/config/PrusaSlicer" "$HOME/.config/"
+    fi
+    if [ -d "$TEMP_DIR/home/config/OrcaSlicer" ]; then
+        echo -e "   -> Restaurando Orca Slicer..."
+        cp -r "$TEMP_DIR/home/config/OrcaSlicer" "$HOME/.config/"
+    fi
+    if [ -d "$TEMP_DIR/home/config/BambuStudio" ]; then
+        echo -e "   -> Restaurando Bambu Studio..."
+        cp -r "$TEMP_DIR/home/config/BambuStudio" "$HOME/.config/"
+    fi
+
+    # 2. RESTAURAR IMPRESORAS
+    echo -e "${CYAN}Restaurando Impresoras (Root)...${NC}"
+    if [ -d "$TEMP_DIR/etc/cups" ]; then
+        sudo systemctl stop cups
+        sudo cp "$TEMP_DIR/etc/cups/printers.conf" /etc/cups/
+        sudo cp -r "$TEMP_DIR/etc/cups/ppd" /etc/cups/
+        if [ -d "$TEMP_DIR/var/lib/hp" ]; then
+            sudo cp -r "$TEMP_DIR/var/lib/hp" /var/lib/
+        fi
+        sudo systemctl start cups
+    fi
+
+    rm -rf "$TEMP_DIR"
+    echo -e "${GREEN}✅ Restauración completada.${NC}"
+    pause
+}
+
+clear
+echo -e "${BLUE}${BOLD}==================================================${NC}"
+echo -e "           ${MAGENTA}${BOLD}MIGRACIÓN & BACKUP (BAK)${NC}"
+echo -e "${BLUE}${BOLD}==================================================${NC}"
+echo -e "Respalda tus configuraciones críticas."
+echo -e "Incluye: ${CYAN}Slicers 3D, FileZilla, Brave, Drivers Impresoras${NC}."
+echo -e ""
+echo -e "  [${BOLD}1${NC}] 📤 ${BOLD}CREAR Backup${NC}"
+echo -e "  [${BOLD}2${NC}] 📥 ${BOLD}RESTAURAR Backup${NC}"
+echo -e "  [${BOLD}q${NC}] Salir"
+echo -e ""
+echo -ne "${BOLD}Opción > ${NC}"
+read -r OPT
+
+case $OPT in
+    1) do_backup ;;
+    2) do_restore ;;
+    q|Q) exit 0 ;;
+    *) echo "Opción no válida." ;;
+esac

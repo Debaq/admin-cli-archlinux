@@ -1,0 +1,82 @@
+#!/bin/bash
+BASE_DIR=$(dirname "$(dirname "$(readlink -f "$0")")")
+source "$BASE_DIR/lib/utils.sh"
+
+while true; do
+    clear
+    echo -e "${BLUE}${BOLD}==================================================${NC}"
+    echo -e "           ${CYAN}${BOLD}GESTOR DE PROCESOS (PROCS)${NC}"
+    echo -e "${BLUE}${BOLD}==================================================${NC}"
+    
+    # Mostrar carga del sistema
+    LOAD=$(uptime | awk -F'load average:' '{ print $2 }')
+    echo -e "${BOLD}Carga del sistema:${NC} $LOAD"
+    echo -e "${BLUE}--------------------------------------------------${NC}"
+
+    echo -e "Elige una vista:"
+    echo -e "  [${BOLD}1${NC}] Top consumo ${BOLD}CPU${NC} (Los más pesados)"
+    echo -e "  [${BOLD}2${NC}] Top consumo ${BOLD}RAM${NC} (Los más gordos)"
+    echo -e "  [${BOLD}3${NC}] ${BOLD}Buscar${NC} proceso por nombre (ej: python, chrome)"
+    echo -e "  [${BOLD}4${NC}] Listar ${BOLD}TODOS${NC} los procesos"
+    echo -e "  [${BOLD}q${NC}] Salir"
+    echo -e ""
+    echo -ne "${BOLD}Opción > ${NC}"
+    read -r OPT
+
+    case $OPT in
+        1)
+            echo -e "\n${YELLOW}--- TOP 15 CPU ---${NC}"
+            ps -eo pid,ppid,cmd,%mem,%cpu --sort=-%cpu | head -n 16 | cut -c 1-90
+            ;;
+        2)
+            echo -e "\n${YELLOW}--- TOP 15 RAM ---${NC}"
+            ps -eo pid,ppid,cmd,%mem,%cpu --sort=-%mem | head -n 16 | cut -c 1-90
+            ;;
+        3)
+            echo -e "\n${BOLD}Escribe el nombre a buscar: ${NC}"
+            read -r SEARCH
+            echo -e "\n${YELLOW}--- Resultados para '$SEARCH' ---${NC}"
+            # Buscamos ignorando mayúsculas, excluimos grep y el propio script
+            ps -eo pid,user,%cpu,%mem,start,time,comm,args | head -n 1
+            ps -eo pid,user,%cpu,%mem,start,time,comm,args | grep -i "$SEARCH" | grep -v "grep" | cut -c 1-100
+            ;;
+        4)
+            echo -e "\n${YELLOW}--- LISTADO TOTAL DE PROCESOS ---${NC}"
+            echo -e "${CYAN}Tip: Usa las flechas para navegar y 'q' para salir de la lista.${NC}"
+            sleep 1
+            ps -eo pid,user,%cpu,%mem,comm --sort=pid | less
+            ;;
+        q|Q)
+            echo "Bye!"
+            exit 0
+            ;;
+        *)
+            echo "Opción no válida."
+            sleep 1
+            continue
+            ;;
+    esac
+
+    echo -e "${BLUE}--------------------------------------------------${NC}"
+    echo -e "Escribe un ${RED}${BOLD}PID${NC} para matar el proceso, o ${BOLD}Enter${NC} para volver al menú:"
+    read -r PID_KILL
+
+    if [[ -n "$PID_KILL" ]]; then
+        if [[ "$PID_KILL" =~ ^[0-9]+$ ]]; then
+            echo -e "Enviando señal de terminación a PID $PID_KILL..."
+            kill "$PID_KILL" 2>/dev/null
+            if [ $? -eq 0 ]; then
+                echo -e "${GREEN}✅ Señal enviada.${NC}"
+            else
+                echo -e "${RED}❌ Falló (¿necesitas sudo o el proceso ya murió?).${NC}"
+                echo -ne "¿Intentar con sudo kill -9? [s/N]: "
+                read -r FORCE
+                if [[ "$FORCE" == "s" ]]; then
+                    sudo kill -9 "$PID_KILL"
+                    echo -e "${RED}💀 Ejecutado.${NC}"
+                fi
+            fi
+            sleep 2
+        fi
+    fi
+done

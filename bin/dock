@@ -1,0 +1,227 @@
+#!/bin/bash
+BASE_DIR=$(dirname "$(dirname "$(readlink -f "$0")")")
+source "$BASE_DIR/lib/utils.sh"
+
+# ==========================================
+# 0. VERIFICACIONES INICIALES
+# ==========================================
+
+# 1. ¿Está instalado?
+if ! command -v docker &> /dev/null; then
+    clear
+    echo -e "${RED}${BOLD}Docker no está instalado.${NC}"
+    echo -e "Es la herramienta base para contenedores."
+    echo -ne "¿Instalar Docker y Docker Compose ahora? [S/n] "
+    read -r INST
+    if [[ -z "$INST" || "$INST" =~ ^[sS]$ ]]; then
+        sudo pacman -S --noconfirm docker docker-compose
+        echo -e "${GREEN}✅ Instalado.${NC}"
+    else
+        echo "No se puede continuar sin Docker."
+        exit 1
+    fi
+fi
+
+# 2. ¿Está corriendo el servicio?
+if ! systemctl is-active --quiet docker; then
+    clear
+    echo -e "${YELLOW}El servicio de Docker está ${RED}DETENIDO${NC}."
+    echo -ne "¿Iniciarlo ahora? [S/n] "
+    read -r START
+    if [[ -z "$START" || "$START" =~ ^[sS]$ ]]; then
+        sudo systemctl start docker
+        echo -e "${GREEN}✅ Docker iniciado.${NC}"
+    else
+        echo "Docker necesita estar corriendo."
+        exit 1
+    fi
+fi
+
+# 3. ¿Permisos de usuario? (Para no usar sudo siempre)
+# Si el usuario actual no pertenece al grupo docker...
+if ! groups | grep -q "docker"; then
+    echo -e "${YELLOW}⚠️  Tu usuario no está en el grupo 'docker'.${NC}"
+    echo -e "Esto significa que tendrás que usar 'sudo' para todo."
+    echo -ne "¿Quieres que te agregue al grupo docker (recomendado)? [S/n] "
+    read -r GRP
+    if [[ -z "$GRP" || "$GRP" =~ ^[sS]$ ]]; then
+        sudo usermod -aG docker "$USER"
+        echo -e "${GREEN}✅ Hecho. Necesitarás cerrar sesión y volver a entrar para que funcione sin sudo.${NC}"
+        echo -e "Por ahora, usaré sudo automáticamente para esta sesión."
+        USE_SUDO="sudo"
+    else
+        USE_SUDO="sudo"
+    fi
+else
+    USE_SUDO=""
+fi
+
+# ==========================================
+# 1. FUNCIONES
+# ==========================================
+
+list_containers() {
+    echo -e "${BLUE}--------------------------------------------------${NC}"
+    echo -e "           ${BOLD}CONTENEDORES (Instancias)${NC}"
+    echo -e "${BLUE}--------------------------------------------------${NC}"
+    
+    # Formato limpio: ID, Nombre, Estado, Imagen, Puertos
+    $USE_SUDO docker ps -a --format "table {{.ID}}\t{{.Names}}\t{{.Status}}\t{{.Image}}" | head -n 15
+    
+    COUNT=$($USE_SUDO docker ps -q | wc -l)
+    TOTAL=$($USE_SUDO docker ps -aq | wc -l)
+    echo -e "${BLUE}--------------------------------------------------${NC}"
+    echo -e "Corriendo: ${GREEN}$COUNT${NC} / Total: $TOTAL"
+}
+
+container_menu() {
+    echo -e "\nEscribe el ${BOLD}CONTAINER ID${NC} (o primeros 3 caracteres) para gestionarlo:"
+    read -r CID
+    if [ -z "$CID" ]; then return; fi
+
+    # Verificar si existe
+    if ! $USE_SUDO docker ps -a | grep -q "$CID"; then
+        echo -e "${RED}Contenedor no encontrado.${NC}"
+        sleep 1
+        return
+    fi
+
+    FULL_NAME=$($USE_SUDO docker inspect --format scope scope "{{.Name}}" "$CID" | cut -d'/' -f2)
+    
+    while true; do
+        clear
+        echo -e "${CYAN}${BOLD}GESTIONANDO: $FULL_NAME ($CID)${NC}"
+        echo -e "  [${BOLD}1${NC}] 🟢 ${BOLD}Start${NC} (Iniciar)"
+        echo -e "  [${BOLD}2${NC}] 🔴 ${BOLD}Stop${NC} (Detener)"
+        echo -e "  [${BOLD}3${NC}] 📜 ${BOLD}Logs${NC} (Ver qué pasa dentro - Ctrl+C para salir)"
+        echo -e "  [${BOLD}4${NC}] 💻 ${BOLD}Shell${NC} (Entrar a la terminal del contenedor)"
+        echo -e "  [${BOLD}5${NC}] 🗑️  ${BOLD}Remove${NC} (Borrar contenedor)"
+        echo -e "  [${BOLD}q${NC}] Volver"
+        echo -ne "\nOpción > "
+        read -r ACTION
+
+        case $ACTION in
+            1) $USE_SUDO docker start "$CID" ;;
+            2) $USE_SUDO docker stop "$CID" ;;
+            3) 
+                clear
+                echo -e "${YELLOW}Mostrando logs (Ctrl+C para salir)...${NC}"
+                $USE_SUDO docker logs -f --tail 50 "$CID"
+                ;;
+            4)
+                echo -e "${GREEN}Entrando... (Escribe 'exit' para salir)${NC}"
+                # Intentamos bash, si falla, sh
+                $USE_SUDO docker exec -it "$CID" /bin/bash || $USE_SUDO docker exec -it "$CID" /bin/sh
+                ;;
+            5)
+                echo -ne "¿Seguro que quieres borrar $FULL_NAME? [y/N] "
+                read -r CONFIRM
+                if [[ "$CONFIRM" == "y" ]]; then
+                    $USE_SUDO docker rm -f "$CID"
+                    echo -e "${RED}Borrado.${NC}"
+                    sleep 1
+                    break
+                fi
+                ;;
+            q) break ;;
+        esac
+        echo -e "Presiona Enter..."
+        read -r
+    done
+}
+
+# ==========================================
+# 2. BUCLE PRINCIPAL
+# ==========================================
+while true; do
+    clear
+    echo -e "${BLUE}${BOLD}==================================================${NC}"
+    echo -e "           ${CYAN}${BOLD}DOCKER MANAGER (DOCK)${NC}"
+    echo -e "${BLUE}${BOLD}==================================================${NC}"
+    
+    list_containers
+
+    echo -e ""
+    echo -e "Acciones Globales:"
+    echo -e "  [${BOLD}i${NC}] 📦 ${BOLD}Imágenes${NC} (Ver/Borrar descargadas)"
+    echo -e "  [${BOLD}s${NC}] 📊 ${BOLD}Stats${NC} (Uso CPU/RAM en vivo)"
+    echo -e "  [${BOLD}p${NC}] 🧹 ${BOLD}Prune System${NC} (Liberar espacio disco)"
+    echo -e "  [${BOLD}ID${NC}]    Escribe ID para gestionar un contenedor"
+    echo -e "  [${BOLD}q${NC}]    Salir"
+    
+    echo -ne "\n${BOLD}Opción > ${NC}"
+    read -r OPT
+
+    case $OPT in
+        q|Q) exit 0 ;;
+        s) 
+            echo -e "Pulsa Ctrl+C para salir..."
+            $USE_SUDO docker stats 
+            ;;
+        i)
+            clear
+            echo -e "${YELLOW}--- IMÁGENES LOCALES ---${NC}"
+            $USE_SUDO docker images
+            echo -e "\nPara borrar: 'docker rmi <IMAGE ID>'
+            pause
+            ;;
+        p)
+            echo -e "\n${RED}${BOLD}PELIGRO: Esto borrará:${NC}"
+            echo -e "  - Contenedores parados"
+            echo -e "  - Imágenes no usadas (dangling)"
+            echo -e "  - Caché de compilación"
+            echo -ne "¿Proceder? [y/N] "
+            read -r SURE
+            if [[ "$SURE" == "y" ]]; then
+                $USE_SUDO docker system prune -a -f
+                echo -e "${GREEN}Limpieza completada.${NC}"
+                pause
+            fi
+            ;;
+        *)
+            # Si parece un ID, intentar abrir menú de contenedor
+            if [ -n "$OPT" ]; then
+                container_menu # Usa la variable OPT que leyó antes o pide input si está vacia? 
+                               # container_menu pide input propio, mejor pasemos lógica.
+                # Re-logic: container_menu lee su propio input.
+                # Vamos a hacer un truco: si OPT no es comando, asumimos que es un ID y lo inyectamos?
+                # No, container_menu tiene su propio read. Mejor llamarlo directamente si no coincide con comando
+                # Pero container_menu empieza pidiendo ID.
+                # Lo simplificamos:
+                # El usuario ya escribió el ID en OPT. Pasémoslo.
+                
+                # Pequeña corrección al flujo:
+                # container_menu espera leer un ID. Vamos a modificar container_menu para aceptar argumento opcional
+                # O simplemente llamamos a la lógica de gestión directamente
+                 
+                # REFACTOR RÁPIDO INLINE PARA QUE FUNCIONE BIEN
+                CID="$OPT"
+                 if $USE_SUDO docker ps -a | grep -q "$CID"; then
+                    # Es un ID válido, entramos al menú de gestión
+                     FULL_NAME=$($USE_SUDO docker inspect --format scope scope "{{.Name}}" "$CID" | cut -d'/' -f2)
+                    while true; do
+                        clear
+                        echo -e "${CYAN}${BOLD}GESTIONANDO: $FULL_NAME ($CID)${NC}"
+                        echo -e "  [${BOLD}1${NC}] 🟢 ${BOLD}Start${NC}"
+                        echo -e "  [${BOLD}2${NC}] 🔴 ${BOLD}Stop${NC}"
+                        echo -e "  [${BOLD}3${NC}] 📜 ${BOLD}Logs${NC}"
+                        echo -e "  [${BOLD}4${NC}] 💻 ${BOLD}Shell${NC}"
+                        echo -e "  [${BOLD}5${NC}] 🗑️  ${BOLD}Delete${NC}"
+                        echo -e "  [${BOLD}q${NC}] Volver"
+                        echo -ne "\nOpción > "
+                        read -r ACTION
+                        case $ACTION in
+                            1) $USE_SUDO docker start "$CID" ;;
+                            2) $USE_SUDO docker stop "$CID" ;;
+                            3) $USE_SUDO docker logs -f --tail 50 "$CID" ;;
+                            4) $USE_SUDO docker exec -it "$CID" /bin/bash || $USE_SUDO docker exec -it "$CID" /bin/sh ;;
+                            5) $USE_SUDO docker rm -f "$CID"; break ;;
+                            q) break ;;
+                        esac
+                        # sleep 1
+                    done
+                 fi
+            fi
+            ;;
+    esac
+done

@@ -1,0 +1,90 @@
+#!/bin/bash
+BASE_DIR=$(dirname "$(dirname "$(readlink -f "$0")")")
+source "$BASE_DIR/lib/utils.sh"
+
+# ==========================================
+# FIXES DE APLICACIONES
+# ==========================================
+
+clear
+echo -e "${BLUE}${BOLD}==================================================${NC}"
+echo -e "           ${YELLOW}${BOLD}FIXES DE APLICACIONES${NC}"
+echo -e "${BLUE}${BOLD}==================================================${NC}"
+
+echo -e "  [${BOLD}1${NC}] ${BOLD}LibreOffice GTK3${NC}"
+echo -e "         (Fix tema oscuro / glitches visuales en KDE)"
+echo -e "  [${BOLD}q${NC}] Salir"
+echo -e ""
+echo -ne "${BOLD}Opción > ${NC}"
+read -r OPT
+
+case $OPT in
+    1)
+        echo -e "\n${YELLOW}--- FIX: LibreOffice con GTK3 ---${NC}"
+        echo -e "Fuerza a LibreOffice a usar el backend GTK3 en lugar de qt/kf5,"
+        echo -e "corrigiendo problemas visuales en KDE (tema oscuro, iconos rotos, etc.).\n"
+
+        # --- Paso 1: Alias en shell rc ---
+        SHELL_RC=""
+        if [ -n "$ZSH_VERSION" ] || [[ "$SHELL" == */zsh ]]; then
+            SHELL_RC="$HOME/.zshrc"
+        else
+            SHELL_RC="$HOME/.bashrc"
+        fi
+
+        ALIAS_LINE="alias libreoffice='SAL_USE_VCLPLUGIN=gtk3 libreoffice'"
+
+        if grep -qF "SAL_USE_VCLPLUGIN=gtk3" "$SHELL_RC" 2>/dev/null; then
+            echo -e "${GREEN}El alias ya existe en $SHELL_RC. Saltando...${NC}"
+        else
+            echo "$ALIAS_LINE" >> "$SHELL_RC"
+            echo -e "${GREEN}Alias agregado a $SHELL_RC${NC}"
+        fi
+
+        # --- Paso 2: Copiar y parchear .desktop files ---
+        LOCAL_APPS="$HOME/.local/share/applications"
+        mkdir -p "$LOCAL_APPS"
+
+        DESKTOP_FILES=$(find /usr/share/applications -name "libreoffice-*.desktop" 2>/dev/null)
+
+        if [ -z "$DESKTOP_FILES" ]; then
+            echo -e "${YELLOW}No se encontraron archivos .desktop de LibreOffice en /usr/share/applications/${NC}"
+        else
+            echo -e "\n${CYAN}Parcheando archivos .desktop para menú de escritorio...${NC}"
+            while IFS= read -r desktop_file; do
+                filename=$(basename "$desktop_file")
+                dest="$LOCAL_APPS/$filename"
+
+                cp "$desktop_file" "$dest"
+
+                # Reemplazar líneas Exec= para anteponer la variable de entorno
+                sed -i 's|^Exec=libreoffice|Exec=env SAL_USE_VCLPLUGIN=gtk3 libreoffice|' "$dest"
+                # Evitar doble aplicación si se ejecuta de nuevo
+                sed -i 's|^Exec=env SAL_USE_VCLPLUGIN=gtk3 env SAL_USE_VCLPLUGIN=gtk3|Exec=env SAL_USE_VCLPLUGIN=gtk3|' "$dest"
+
+                echo -e "  ${GREEN}+${NC} $filename"
+            done <<< "$DESKTOP_FILES"
+
+            echo -e "\n${GREEN}Los .desktop se copiaron a ~/.local/share/applications/${NC}"
+            echo -e "${CYAN}(No se pierden con actualizaciones de paquetes)${NC}"
+        fi
+
+        # --- Paso 3: Recargar shell rc ---
+        echo -e "\n${CYAN}Recargando $SHELL_RC...${NC}"
+        # No podemos hacer source desde un subshell, pero informamos al usuario
+        echo -e "${YELLOW}Nota: Ejecuta ${BOLD}source $SHELL_RC${NC}${YELLOW} en tu terminal actual"
+        echo -e "o abre una terminal nueva para que el alias surta efecto.${NC}"
+
+        echo -e "\n${GREEN}Fix aplicado. LibreOffice ahora usará GTK3.${NC}"
+        ;;
+
+    q|Q)
+        exit 0
+        ;;
+    *)
+        echo "Opción inválida."
+        ;;
+esac
+
+echo -e "\nPresiona Enter para continuar..."
+read -r

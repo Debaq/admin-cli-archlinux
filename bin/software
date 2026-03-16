@@ -1,0 +1,157 @@
+#!/bin/bash
+BASE_DIR=$(dirname "$(dirname "$(readlink -f "$0")")")
+source "$BASE_DIR/lib/utils.sh"
+
+# 0. VALIDAR SUDO
+check_sudo
+
+# 1. INSTALAR DIALOG (Estándar de Arch)
+if ! command -v dialog &> /dev/null; then
+    echo -e "${YELLOW}Instalando 'dialog'...${NC}"
+    sudo pacman -S --noconfirm dialog
+fi
+
+# 2. DEFINIR MENÚ
+CMD=(dialog --stdout --title "CENTRO DE SOFTWARE PERSONALIZADO" \
+    --checklist "Espacio: Marcar | Enter: Instalar" 0 0 0)
+
+OPTIONS=(
+    "micromamba"      "Gestor de entornos (Recomendado)" on
+    "chaotic-aur"     "Repos pre-compilados (Acelera AUR)" on
+    "yay"             "AUR Helper" on
+    
+    "--- 3D & CNC ---" "--------------------------------" off
+    "blender"         "Modelado 3D" on
+    "freecad"         "CAD Paramétrico" on
+    "prusa-slicer"    "Slicer Prusa" on
+    "orca-slicer-bin" "Orca Slicer (Bambu/Voron)" on
+    "lycheeslicer"    "Lychee Slicer (Resina)" on
+    "gsender-bin"     "Control CNC (gSender)" on
+    
+    "--- ELECTRÓNICA ---" "--------------------------------" off
+    "stlink"          "ST-Link Tools" on
+    "openocd"         "Open On-Chip Debugger" on
+    "minicom"         "Terminal Serial" on
+    "antimicrox"      "Mapeo de Mandos/Gamepads" off
+    
+    "--- DEV WEB/CODING ---" "--------------------------------" off
+    "visual-studio-code-bin" "VS Code" on
+    "code-marketplace" "Marketplace Libre para VSCode" on
+    "git"             "Git" on
+    "github-desktop"  "GitHub Desktop" on
+    "docker"          "Docker" on
+    "podman"          "Podman" off
+    "nodejs"          "Node.js" on
+    "npm"             "NPM" on
+    "yarn"            "Yarn" on
+    "python-pip"      "Pip" on
+    "rust"            "Rust Language" on
+    
+    "--- GRÁFICOS ---" "--------------------------------" off
+    "gimp"            "Editor de Imágenes (GIMP)" on
+    "inkscape"        "Vectores" on
+    "inkscape-silhouette-git" "Inkscape Plugin Silhouette" on
+    "kdenlive"        "Editor de Video" on
+    "obs-studio"      "Streaming/Grabación" off
+    "spectacle"       "Capturas de Pantalla (KDE)" on
+    
+    "--- OFICINA/COMMS ---" "--------------------------------" off
+    "libreoffice-fresh" "LibreOffice Suite" on
+    "teams"           "Microsoft Teams" on
+    "zoom"            "Zoom Videoconferencias" on
+    "rambox-pro-bin"  "Agregador de Mensajería" on
+    "anydesk-bin"     "Escritorio Remoto" on
+    "thunderbird"     "Correo Electrónico" off
+    
+    "--- NAVEGADORES ---" "--------------------------------" off
+    "brave-bin"       "Brave Browser" on
+    "firefox"         "Firefox" off
+    "chromium"        "Chromium" off
+    "firedragon"      "Firedragon Browser" off
+    
+    "--- UTILIDADES ---" "--------------------------------" off
+    "virtualbox"      "Virtualización" on
+    "balena-etcher-bin" "Grabador ISOs" on
+    "rpi-imager"      "Raspberry Pi Imager" on
+    "filezilla"       "FTP Client" on
+    "gparted"         "Particionador" on
+    "btop"            "Monitor de Recursos" off
+    "neofetch"        "Info Sistema" off
+    "ttf-fira-code"   "Fira Code Font" on
+    "ttf-cascadia-code" "Cascadia Code Font" on
+    "ttf-ms-win10-auto" "Fuentes Windows 10" on
+    
+    "--- DRIVERS IMP ---" "--------------------------------" off
+    "brother-dcp165c" "Brother DCP-165C" off
+    "zijiang-pos58-driver" "Impresora Térmica 58mm" off
+)
+
+# Ejecutar Dialog
+SELECTION=$("${CMD[@]}" "${OPTIONS[@]}")
+
+# Comprobar si canceló
+if [ $? -ne 0 ] || [ -z "$SELECTION" ]; then
+    echo -e "\n${YELLOW}Cancelado.${NC}"
+    exit 0
+fi
+
+clear
+echo -e "${BLUE}${BOLD}Instalando selección personalizada...${NC}"
+
+# --- LÓGICA DE INSTALACIÓN ---
+
+# 1. Chaotic & Yay (Base)
+if [[ "$SELECTION" == *"chaotic-aur"* ]]; then
+    echo -e "\n${MAGENTA}>>> Chaotic-AUR...${NC}"
+    if ! grep -q "\[chaotic-aur\]" /etc/pacman.conf; then
+        sudo pacman-key --recv-key 3056513887B78AEB --keyserver keyserver.ubuntu.com
+        sudo pacman-key --lsign-key 3056513887B78AEB
+        sudo pacman -U --noconfirm 'https://cdn-mirror.chaotic.cx/chaotic-aur/chaotic-keyring.pkg.tar.zst'
+        sudo pacman -U --noconfirm 'https://cdn-mirror.chaotic.cx/chaotic-aur/chaotic-mirrorlist.pkg.tar.zst'
+        echo "" | sudo tee -a /etc/pacman.conf
+        echo "[chaotic-aur]" | sudo tee -a /etc/pacman.conf
+        echo "Include = /etc/pacman.d/chaotic-mirrorlist" | sudo tee -a /etc/pacman.conf
+        sudo pacman -Sy
+    fi
+fi
+
+if [[ "$SELECTION" == *"yay"* ]]; then
+    if ! command -v yay &> /dev/null; then
+        echo -e "\n${CYAN}>>> Instalando Yay...${NC}"
+        sudo pacman -S --needed --noconfirm git base-devel
+        git clone https://aur.archlinux.org/yay.git /tmp/yay
+        cd /tmp/yay && makepkg -si --noconfirm
+    fi
+fi
+
+# 2. Micromamba
+if [[ "$SELECTION" == *"micromamba"* ]]; then
+    if ! command -v micromamba &> /dev/null; then
+        echo -e "\n${CYAN}>>> Instalando Micromamba...${NC}"
+        "${SHELL}" <(curl -L micro.mamba.pm/install.sh)
+    fi
+fi
+
+# 3. Paquetes (Pacman + AUR)
+TO_INSTALL=""
+for ITEM in $SELECTION; do
+    ITEM=$(echo "$ITEM" | sed 's/"//g')
+    if [[ "$ITEM" != "micromamba" ]] && [[ "$ITEM" != "chaotic-aur" ]] && [[ "$ITEM" != "yay" ]] && [[ "$ITEM" != *"---"* ]]; then
+        TO_INSTALL="$TO_INSTALL $ITEM"
+    fi
+done
+
+if [ -n "$TO_INSTALL" ]; then
+    echo -e "\n${BLUE}>>> Procesando paquetes:${NC} $TO_INSTALL"
+    
+    # Estrategia: Intentar Pacman primero (repos oficiales + chaotic), lo que falle tirar de Yay
+    if sudo pacman -S --needed --noconfirm $TO_INSTALL; then
+        echo -e "${GREEN}✅ Todo instalado vía Pacman/Chaotic.${NC}"
+    else
+        echo -e "${YELLOW}⚠️  Algunos paquetes son exclusivos de AUR. Usando Yay...${NC}"
+        yay -S --needed --noconfirm $TO_INSTALL
+    fi
+fi
+
+echo -e "\n${GREEN}Setup Finalizado.${NC}"
+pause

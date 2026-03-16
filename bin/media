@@ -1,0 +1,86 @@
+#!/bin/bash
+BASE_DIR=$(dirname "$(dirname "$(readlink -f "$0")")")
+source "$BASE_DIR/lib/utils.sh"
+
+# Detectar dispositivo de brillo (AMD/Intel)
+BACKLIGHT_DEV=$(ls /sys/class/backlight/ | head -1)
+BACKLIGHT_PATH="/sys/class/backlight/$BACKLIGHT_DEV"
+
+clear
+echo -e "${BLUE}${BOLD}==================================================${NC}"
+echo -e "           ${CYAN}${BOLD}CONTROL A/V (PANTALLA & AUDIO)${NC}"
+echo -e "${BLUE}${BOLD}==================================================${NC}"
+
+# Estado Actual
+if [ -n "$BACKLIGHT_DEV" ]; then
+    MAX=$(cat "$BACKLIGHT_PATH/max_brightness")
+    CUR=$(cat "$BACKLIGHT_PATH/brightness")
+    PCT=$(( 100 * CUR / MAX ))
+    echo -e "${BOLD}Brillo Actual:${NC}   $PCT% (HW: $CUR/$MAX)"
+else
+    echo -e "${BOLD}Brillo:${NC}          ${RED}No detectado${NC}"
+fi
+
+# Estado Audio
+VOL=$(pamixer --get-volume 2>/dev/null || echo "N/A")
+MUTE=$(pamixer --get-mute 2>/dev/null)
+if [ "$MUTE" == "true" ]; then VOL_STR="${RED}MUTEADO${NC}"; else VOL_STR="${GREEN}$VOL%${NC}"; fi
+echo -e "${BOLD}Volumen:${NC}         $VOL_STR"
+
+echo -e "${BLUE}--------------------------------------------------${NC}"
+echo -e "  [${BOLD}1${NC}] ☀️  ${BOLD}Forzar Brillo${NC} (Ignorar KDE)"
+echo -e "  [${BOLD}2${NC}] 📺 ${BOLD}Resetear Pantallas${NC} (Detectar Dock/HDMI)"
+echo -e "  [${BOLD}3${NC}] 🔊 ${BOLD}Reiniciar Audio${NC} (Fix Pipewire)"
+echo -e "  [${BOLD}4${NC}] 🔈 ${BOLD}Volumen de Emergencia${NC} (Unmute + 50%)"
+echo -e "  [${BOLD}q${NC}] Salir"
+echo -e ""
+echo -ne "${BOLD}Opción > ${NC}"
+read -r OPT
+
+case $OPT in
+    1)
+        echo -ne "\n${BOLD}Introduce porcentaje (0-100): ${NC}"
+        read -r NEW_PCT
+        if [[ "$NEW_PCT" =~ ^[0-9]+$ ]] && [ "$NEW_PCT" -le 100 ]; then
+            NEW_VAL=$(( NEW_PCT * MAX / 100 ))
+            echo -e "Aplicando $NEW_VAL a hardware..."
+            echo "$NEW_VAL" | sudo tee "$BACKLIGHT_PATH/brightness" > /dev/null
+            echo -e "${GREEN}✅ Brillo forzado al $NEW_PCT%.${NC}"
+        else
+            echo -e "${RED}Número inválido.${NC}"
+        fi
+        ;;
+    2)
+        echo -e "\n${YELLOW}Reseteando configuración de pantallas (kscreen)...${NC}"
+        # Intentamos forzar la detección en KDE
+        if command -v kscreen-doctor &> /dev/null; then
+            # kscreen-doctor no tiene un "force detect", pero listar salidas a veces despierta el bus
+            kscreen-doctor --outputs > /dev/null
+            # Opcion nuclear suave: recargar el demonio KScreen
+            pkill -HUP kscreen_backend_launcher 2>/dev/null
+            echo -e "${GREEN}✅ Escaneo de salidas completado.${NC}"
+            echo -e "Info detectada:"
+            kscreen-doctor -o | grep "Output"
+        else
+            echo -e "${RED}Error: No tienes kscreen-doctor instalado.${NC}"
+        fi
+        ;;
+    3)
+        echo -e "\n${YELLOW}Reiniciando servicios de audio (User level)...${NC}"
+        systemctl --user restart wireplumber pipewire pipewire-pulse
+        sleep 2
+        echo -e "${GREEN}✅ Audio reiniciado.${NC}"
+        ;;
+    4)
+        echo -e "\n${YELLOW}Restaurando audio a niveles seguros...${NC}"
+        pactl set-sink-mute @DEFAULT_SINK@ 0
+        pactl set-sink-volume @DEFAULT_SINK@ 50%
+        echo -e "${GREEN}✅ Volumen al 50% y desmuteado.${NC}"
+        ;;
+    q|Q)
+        exit 0
+        ;;
+    *)
+        echo "Opción no válida."
+        ;;
+esac

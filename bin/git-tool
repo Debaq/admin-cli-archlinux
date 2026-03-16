@@ -1,0 +1,105 @@
+#!/bin/bash
+BASE_DIR=$(dirname "$(dirname "$(readlink -f "$0")")")
+source "$BASE_DIR/lib/utils.sh"
+
+# Configuración: Carpetas donde buscar proyectos (puedes añadir más)
+SEARCH_ROOTS=($HOME/Proyectos "$HOME/Projects" "$HOME/Escritorio/Proyectos" "$HOME/dev" "$HOME/workspace")
+
+# Colores de Estado
+STAT_DIRTY="${RED}📦 MODIFICADO${NC}"
+STAT_CLEAN="${GREEN}✨ LIMPIO${NC}"
+STAT_UNTRACKED="${YELLOW}❓ UNTRACKED${NC}"
+
+# Función para escanear
+scan_repos() {
+    REPOS=()
+    echo -e "${BLUE}Escaneando repositorios...${NC}"
+    
+    # Buscar carpetas .git (maxdepth 3 para no tardar años)
+    for root in "${SEARCH_ROOTS[@]}"; do
+        if [ -d "$root" ]; then
+            while IFS= read -r gitdir; do
+                repo_root=$(dirname "$gitdir")
+                REPOS+=("$repo_root")
+            done < <(find "$root" -maxdepth 3 -name ".git" -type d 2>/dev/null)
+        fi
+    done
+}
+
+# Pantalla Principal
+while true; do
+    clear
+    echo -e "${BLUE}${BOLD}==================================================${NC}"
+    echo -e "           ${MAGENTA}${BOLD}GIT PROJECT MANAGER${NC}"
+    echo -e "${BLUE}${BOLD}==================================================${NC}"
+    
+    if [ ${#REPOS[@]} -eq 0 ]; then
+        scan_repos
+    fi
+
+    echo -e "${BOLD}Repositorios encontrados:${NC} ${#REPOS[@]}"
+    printf "${BOLD}%-4s %-35s %-15s${NC}\n" "ID" "PROYECTO" "ESTADO"
+    echo -e "${BLUE}--------------------------------------------------${NC}"
+
+    i=0
+    for repo in "${REPOS[@]}"; do
+        NAME=$(basename "$repo")
+        
+        # Chequeo rápido de estado
+        cd "$repo"
+        if [ -n "$(git status --porcelain)" ]; then
+            # Hay cambios
+            if [ -n "$(git status --porcelain | grep '^??')" ]; then
+                STATUS="$STAT_UNTRACKED"
+            else
+                STATUS="$STAT_DIRTY"
+            fi
+        else
+            STATUS="$STAT_CLEAN"
+        fi
+        
+        printf "${CYAN}[%d]${NC}  %-35s %b\n" "$i" "${NAME:0:34}" "$STATUS"
+        ((i++))
+    done
+
+    echo -e "${BLUE}==================================================${NC}"
+    echo -e "  [${BOLD}p${NC}] ⬇️  ${BOLD}PULL ALL${NC} (Actualizar todos)"
+    echo -e "  [${BOLD}s${NC}] 🔄 ${BOLD}Re-escanear${NC}"
+    echo -e "  [${BOLD}Número${NC}] Abrir terminal en el proyecto"
+    echo -e "  [${BOLD}q${NC}] Salir"
+    echo -e ""
+    echo -ne "${BOLD}Opción > ${NC}"
+    read -r OPT
+
+    if [[ "$OPT" == "q" ]]; then exit 0; fi
+    
+    if [[ "$OPT" == "s" ]]; then 
+        REPOS=() # Forzar rescan
+        continue
+    fi
+
+    # PULL MASIVO
+    if [[ "$OPT" == "p" ]]; then
+        echo -e "\n${YELLOW}Iniciando actualización masiva...${NC}"
+        for repo in "${REPOS[@]}"; do
+            echo -ne "Actualizando $(basename "$repo")... "
+            cd "$repo"
+            git pull &>/dev/null
+            if [ $? -eq 0 ]; then echo -e "${GREEN}OK${NC}"; else echo -e "${RED}Error/Conflict${NC}"; fi
+        done
+        pause
+        continue
+    fi
+
+    # ENTRAR A REPO
+    if [[ "$OPT" =~ ^[0-9]+$ ]] && [ "$OPT" -lt "${#REPOS[@]}" ]; then
+        TARGET="${REPOS[$OPT]}"
+        clear
+        echo -e "${GREEN}🚀 Entrando a: $TARGET${NC}"
+        echo -e "(Escribe 'exit' para volver al gestor)"
+        cd "$TARGET"
+        # Lanzar una sub-shell en ese directorio
+        $SHELL
+        continue
+    fi
+done

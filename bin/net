@@ -1,0 +1,233 @@
+#!/bin/bash
+BASE_DIR=$(dirname "$(dirname "$(readlink -f "$0")")")
+source "$BASE_DIR/lib/utils.sh"
+
+# Función para verificar dependencias de red
+check_net_deps() {
+    local missing=0
+    if ! command -v speedtest-cli &> /dev/null; then missing=1; fi
+    if ! command -v jq &> /dev/null; then missing=1; fi
+    if ! command -v nmap &> /dev/null; then missing=1; fi
+
+    if [ $missing -eq 1 ]; then
+        echo -e "${YELLOW}Faltan herramientas para el Radar de Red (speedtest-cli, jq, nmap).${NC}"
+        echo -ne "¿Instalar ahora? [S/n] "
+        read -r INST
+        if [[ -z "$INST" || "$INST" =~ ^[sS]$ ]]; then
+            # Intentar instalar
+            if command -v yay &> /dev/null; then
+                yay -S --noconfirm speedtest-cli jq nmap
+            else
+                sudo pacman -S --noconfirm speedtest-cli jq nmap
+            fi
+        fi
+    fi
+}
+check_net_deps
+
+clear
+echo -e "${BLUE}${BOLD}==================================================${NC}"
+echo -e "           ${CYAN}${BOLD}RADAR DE RED & PUERTOS${NC}"
+echo -e "${BLUE}${BOLD}==================================================${NC}"
+
+# --- INFO DE RED EXTENDIDA ---
+echo -e "${YELLOW}--- IDENTIDAD DE RED ---${NC}"
+
+# IP Local (detectar interfaz principal)
+IFACE=$(ip route | grep default | awk '{print $5}' | head -1)
+# CIDR de la red local (ej: 192.168.1.5/24) para usar en Nmap
+LOCAL_CIDR=$(ip -o -f inet addr show "$IFACE" | awk '{print $4}' | head -1)
+LOCAL_IP=${LOCAL_CIDR%/*}
+GATEWAY=$(ip route | grep default | awk '{print $3}' | head -1)
+
+# IP Pública & Info (Con timeout por si no hay internet)
+# Usamos ipinfo.io que da JSON: { ip, city, region, org (ISP) }
+NET_INFO=$(curl -s --max-time 2 https://ipinfo.io/json)
+PUB_IP=$(echo "$NET_INFO" | jq -r '.ip // "Offline"')
+CITY=$(echo "$NET_INFO" | jq -r '.city // "-" ')
+ISP=$(echo "$NET_INFO" | jq -r '.org // "-"')
+
+echo -e "${BOLD}Interfaz:${NC}    $IFACE"
+echo -e "${BOLD}IP Local:${NC}    $LOCAL_IP"
+echo -e "${BOLD}Gateway:${NC}     $GATEWAY"
+echo -e "${BOLD}IP Pública:${NC}  $PUB_IP  ${CYAN}($CITY)${NC}"
+echo -e "${BOLD}Proveedor:${NC}   $ISP"
+
+echo -e "${BLUE}--------------------------------------------------${NC}"
+
+# --- ESTADO DEL FIREWALL ---
+FW_STATUS="${RED}Desconocido${NC}"
+if command -v ufw >/dev/null 2>&1;
+then
+    UFW_STATE=$(sudo ufw status | grep "Status" | awk '{print $2}')
+    if [ "$UFW_STATE" == "active" ]; then FW_STATUS="${GREEN}UFW ACTIVO${NC}"; else FW_STATUS="${YELLOW}UFW INACTIVO${NC}"; fi
+elif command -v firewall-cmd >/dev/null 2>&1;
+then
+    if systemctl is-active --quiet firewalld; then FW_STATUS="${GREEN}Firewalld ACTIVO${NC}"; else FW_STATUS="${YELLOW}Firewalld INACTIVO${NC}"; fi
+else
+    IPT=$(sudo iptables -L | grep "Chain INPUT" | wc -l)
+    if [ "$IPT" -gt 0 ]; then FW_STATUS="${BLUE}IPTables Detectado${NC}"; fi
+fi
+echo -e "${BOLD}Firewall:${NC}    $FW_STATUS"
+
+echo -e "${BLUE}--------------------------------------------------${NC}"
+echo -e "           ${BOLD}PUERTOS ESCUCHANDO (LISTEN)${NC}"
+echo -e "${BLUE}--------------------------------------------------${NC}"
+
+# --- TABLA DE PUERTOS ---
+printf "${BOLD}%-10s %-25s %-15s %-10s${NC}\n" "PUERTO" "DIRECCIÓN" "PROCESO" "PID"
+
+sudo ss -tulnp | grep LISTEN | awk -v g="$GREEN" -v y="$YELLOW" -v m="$MAGENTA" -v nc="$NC" '
+{
+    split($5, a, ":")
+    port = a[length(a)]
+    addr = $5
+    
+    proc_raw = $7
+    split(proc_raw, p, "\"")
+    proc_name = p[2]
+    
+    split(proc_raw, pid_arr, "pid=")
+    split(pid_arr[2], pid_clean, ",")
+    pid = pid_clean[1]
+
+    color = nc
+    if (port == 3000 || port == 4200 || port == 5173 || port == 8000 || port == 8080) {
+        color = y
+    }
+
+    printf "%s%-10s%s %-25s %s%-15s%s %-10s\n", color, port, nc, addr, m, proc_name, nc, pid
+}' | sort -n -k1 | head -n 10
+
+echo -e "${BLUE}${BOLD}==================================================${NC}"
+
+# ==========================================
+# 3. MÓDULO INTERACTIVO
+# ==========================================
+echo -e "Opciones:"
+echo -e "  [${BOLD}Número${NC}] : Liberar ${BOLD}PUERTO${NC} (Kill Process)"
+echo -e "  [${BOLD}c${NC}]      : 📡 ${BOLD}Conectar/Configurar Red${NC} (WiFi/Eth)"
+echo -e "  [${BOLD}n${NC}]      : 🕵️  ${BOLD}Escanear Red Local${NC} (Ver dispositivos)"
+echo -e "  [${BOLD}s${NC}]      : 🚀 Ejecutar ${BOLD}SPEEDTEST${NC}"
+echo -e "  [${BOLD}dev${NC}]    : 🧹 Limpiar entorno DEV (Node/Python)"
+echo -e "  [Enter]    : Salir"
+echo -e ""
+echo -ne "${BOLD}¿Acción? > ${NC}"
+read -r INPUT
+
+if [[ -z "$INPUT" ]]; then
+    exit 0
+fi
+
+# OPCIÓN: CONFIGURAR CONEXIÓN
+if [[ "$INPUT" == "c" ]]; then
+    echo -e "\n${YELLOW}--- GESTOR DE CONEXIONES ---${NC}"
+    
+    # 1. Intentar NMTUI (Interfaz gráfica de terminal)
+    if command -v nmtui &> /dev/null; then
+        echo -e "Abriendo ${BOLD}nmtui${NC}..."
+        nmtui
+        # Al volver, limpiamos y mostramos estado nuevo
+        clear
+        bash "$0"
+        exit 0
+    fi
+
+    # 2. Intentar NMCLI (Comando manual)
+    if command -v nmcli &> /dev/null; then
+        echo -e "Escaneando redes WiFi..."
+        nmcli dev wifi list
+        echo -e ""
+        echo -ne "${BOLD}Escribe el SSID (Nombre WiFi) a conectar: ${NC}"
+        read -r SSID
+        if [ -n "$SSID" ]; then
+            echo -ne "${BOLD}Contraseña: ${NC}"
+            read -s PASS
+            echo ""
+            echo -e "Conectando a ${CYAN}$SSID${NC}..."
+            sudo nmcli dev wifi connect "$SSID" password "$PASS"
+            if [ $? -eq 0 ]; then
+                echo -e "${GREEN}✅ Conectado con éxito.${NC}"
+            else
+                echo -e "${RED}❌ Falló la conexión.${NC}"
+            fi
+        fi
+        pause
+        exit 0
+    fi
+
+    # 3. Intentar IWCTL (iwd - común en instalaciones base)
+    if command -v iwctl &> /dev/null; then
+        echo -e "Lanzando consola interactiva ${BOLD}iwctl${NC}..."
+        echo -e "(Usa: 'station wlan0 scan', 'station wlan0 get-networks', 'station wlan0 connect SSID')"
+        iwctl
+        exit 0
+    fi
+
+    echo -e "${RED}Error: No se encontraron herramientas de red (NetworkManager/iwd).${NC}"
+    echo -e "Asegúrate de tener instalado 'networkmanager' y el servicio activo."
+    pause
+    exit 0
+fi
+
+# OPCIÓN: SPEEDTEST
+if [[ "$INPUT" == "s" ]]; then
+    echo -e "\n${YELLOW}${BOLD}Iniciando prueba de velocidad...${NC}"
+    echo -e "Conectando al servidor óptimo (esto toma unos segundos)..."
+    speedtest-cli --simple
+    pause
+    exit 0
+fi
+
+# OPCIÓN: ESCANEO DE RED (NMAP)
+if [[ "$INPUT" == "n" ]]; then
+    echo -e "\n${YELLOW}${BOLD}🕵️  Escaneando red local: ${CYAN}$LOCAL_CIDR${YELLOW}...${NC}"
+    echo -e "Buscando dispositivos conectados..."
+    
+    # Nmap ping scan, sin resolución DNS para velocidad, output greppable
+    # sudo es necesario para ver las MAC addresses
+    sudo nmap -sn "$LOCAL_CIDR" -oG - | awk -v blue="$BLUE" -v green="$GREEN" -v nc="$NC" '
+    /Host:/ {
+        ip = $2
+        # Intentar extraer nombre si existe, sino status
+        name = $3
+        
+        # Buscar MAC si está disponible (nmap lo pone en output normal, en greppable es diferente)
+        # Hack simple para output bonito:
+        printf "  %s🖥️  %s%s\n", blue, ip, nc
+    }'
+    
+    # Una versión más detallada si awk falla o para más info
+    echo -e "\n${BOLD}Detalle:${NC}"
+    sudo nmap -sn "$LOCAL_CIDR" | grep -E "Nmap scan report|MAC Address" | sed "s/Nmap scan report for /  -> /"
+    
+    pause
+    exit 0
+fi
+
+# OPCIÓN: MATAR TODO LO DEV
+if [[ "$INPUT" == "dev" ]]; then
+    echo -e "${RED}💀 Ejecutando limpieza masiva de desarrollo...${NC}"
+    sudo killall -9 node npm vite python python3 2>/dev/null
+    echo -e "${GREEN}✅ Entorno de desarrollo limpiado.${NC}"
+    exit 0
+fi
+
+# OPCIÓN: MATAR POR PUERTO
+if [[ "$INPUT" =~ ^[0-9]+$ ]]; then
+    PORT="$INPUT"
+    PID=$(sudo ss -lptn "sport = :$PORT" | grep "pid=" | sed 's/.*pid=\([0-9]*\).*/\1/')
+
+    if [[ -z "$PID" ]]; then
+        echo -e "${RED}No se encontró ningún proceso en el puerto $PORT.${NC}"
+    else
+        NAME=$(ps -p "$PID" -o comm=)
+        echo -e "Encontrado: ${BOLD}$NAME${NC} (PID: $PID) en puerto $PORT"
+        echo -e "Liberando puerto..."
+        sudo kill -9 "$PID"
+        echo -e "${GREEN}✅ Puerto $PORT liberado.$NC"
+    fi
+    pause
+else
+    echo "Opción no válida."
+fi

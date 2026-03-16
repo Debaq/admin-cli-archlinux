@@ -1,0 +1,491 @@
+#!/bin/bash
+BASE_DIR=$(dirname "$(dirname "$(readlink -f "$0")")")
+source "$BASE_DIR/lib/utils.sh"
+
+DRIVER_PKG="epson-inkjet-printer-escpr2"
+
+# Compensación de borde inferior para borderless (en mm).
+# Las Epson frenan ~3mm antes del borde de salida en tamaños custom.
+BORDERLESS_EXTRA_MM=3
+
+# ==========================================
+# FUNCIONES AUXILIARES
+# ==========================================
+
+# Convertir mm a puntos PostScript (1pt = 1/72 in)
+mm2pt() {
+    awk "BEGIN { printf \"%.2f\", $1 * 72 / 25.4 }"
+}
+
+# Insertar línea ANTES de la primera ocurrencia de un patrón
+insert_before() {
+    local pattern="$1"
+    local file="$3"
+    LINE="$2" awk -v pat="$pattern" '
+        index($0, pat) > 0 && !done { print ENVIRON["LINE"]; done=1 }
+        { print }
+    ' "$file" > "${file}.tmp" && mv "${file}.tmp" "$file"
+}
+
+# Verificar si el driver está instalado
+check_driver() {
+    if pacman -Qi "$DRIVER_PKG" &>/dev/null; then
+        return 0
+    elif pacman -Qi "epson-inkjet-printer-escpr" &>/dev/null; then
+        DRIVER_PKG="epson-inkjet-printer-escpr"
+        return 0
+    fi
+    return 1
+}
+
+# Listar impresoras Epson en CUPS
+list_cups_epson() {
+    lpstat -e 2>/dev/null | while read -r printer; do
+        if lpstat -v "$printer" 2>/dev/null | grep -qi epson; then
+            echo "$printer"
+        fi
+    done
+}
+
+# ==========================================
+# 1. INSTALAR DRIVER
+# ==========================================
+install_driver() {
+    echo -e "\n${YELLOW}--- DRIVER EPSON (escpr2) ---${NC}"
+
+    if check_driver; then
+        echo -e "${GREEN}$DRIVER_PKG ya está instalado.${NC}"
+        pacman -Qi "$DRIVER_PKG" 2>/dev/null | grep -E "^Nombre|^Versión|^Version|^Name"
+        return 0
+    fi
+
+    if ! command -v yay &>/dev/null; then
+        echo -e "${RED}yay no está instalado.${NC}"
+        echo -e "Instálalo primero desde ${BOLD}[r] Reparar Arch → [2] Instalar YAY${NC}"
+        return 1
+    fi
+
+    echo -e "Instalando ${BOLD}$DRIVER_PKG${NC} desde AUR..."
+    yay -S --noconfirm "$DRIVER_PKG"
+
+    if [ $? -eq 0 ]; then
+        echo -e "${GREEN}Driver instalado correctamente.${NC}"
+    else
+        echo -e "${RED}Error al instalar el driver.${NC}"
+        return 1
+    fi
+}
+
+# ==========================================
+# 2. DETECTAR Y AGREGAR IMPRESORA
+# ==========================================
+add_printer() {
+    echo -e "\n${YELLOW}--- DETECTAR Y AGREGAR IMPRESORA ---${NC}"
+    echo -e "${CYAN}Buscando dispositivos Epson (red y USB)...${NC}\n"
+
+    local devices
+    devices=$(sudo lpinfo -v 2>/dev/null | grep -i epson)
+
+    if [ -z "$devices" ]; then
+        echo -e "${RED}No se encontraron impresoras Epson.${NC}"
+        echo -e "Verifica que esté encendida y conectada (USB o misma red)."
+        return 1
+    fi
+
+    echo -e "${BOLD}Dispositivos encontrados:${NC}"
+    local i=1
+    local uris=()
+    while IFS= read -r line; do
+        local type=$(echo "$line" | awk '{print $1}')
+        local uri=$(echo "$line" | awk '{print $2}')
+        uris+=("$uri")
+
+        local icon="🌐"
+        [[ "$type" == "direct" ]] && icon="🔌"
+
+        echo -e "  [${BOLD}${i}${NC}] ${icon} $uri"
+        ((i++))
+    done <<< "$devices"
+
+    echo -ne "\n${BOLD}Selecciona dispositivo (o 'q' para salir) > ${NC}"
+    read -r sel
+
+    [[ "$sel" == "q" || "$sel" == "Q" ]] && return 0
+
+    if [[ ! "$sel" =~ ^[0-9]+$ ]] || [ "$sel" -lt 1 ] || [ "$sel" -gt "${#uris[@]}" ]; then
+        echo -e "${RED}Selección inválida.${NC}"
+        return 1
+    fi
+
+    local selected_uri="${uris[$((sel-1))]}"
+
+    # Sugerir nombre basado en la URI
+    local suggested_name
+    suggested_name=$(echo "$selected_uri" | grep -oP '(?<=//).*?(?=[?._])' | head -1 | tr ' %' '_' | sed 's/[^a-zA-Z0-9_-]//g')
+    [ -z "$suggested_name" ] && suggested_name="EPSON_Printer"
+
+    echo -ne "${BOLD}Nombre para la impresora [${suggested_name}]: ${NC}"
+    read -r pname
+    [ -z "$pname" ] && pname="$suggested_name"
+
+    # Buscar drivers PPD disponibles
+    echo -e "\n${CYAN}Buscando drivers disponibles...${NC}"
+    local ppd_list
+    ppd_list=$(sudo lpinfo -m 2>/dev/null | grep -i "escpr")
+
+    if [ -z "$ppd_list" ]; then
+        echo -e "${RED}No se encontraron drivers PPD.${NC}"
+        echo -e "Instala el driver primero con la opción [1]."
+        return 1
+    fi
+
+    echo -e "\n${BOLD}Drivers PPD:${NC}"
+    local j=1
+    local models=()
+    while IFS= read -r line; do
+        local model=$(echo "$line" | awk '{print $1}')
+        local desc=$(echo "$line" | cut -d' ' -f2-)
+        models+=("$model")
+        echo -e "  [${BOLD}${j}${NC}] $desc"
+        ((j++))
+    done <<< "$ppd_list"
+
+    echo -ne "\n${BOLD}Selecciona driver > ${NC}"
+    read -r dsel
+
+    if [[ ! "$dsel" =~ ^[0-9]+$ ]] || [ "$dsel" -lt 1 ] || [ "$dsel" -gt "${#models[@]}" ]; then
+        echo -e "${RED}Selección inválida.${NC}"
+        return 1
+    fi
+
+    local selected_model="${models[$((dsel-1))]}"
+
+    echo -e "\n${CYAN}Agregando impresora...${NC}"
+    sudo lpadmin -p "$pname" -E -v "$selected_uri" -m "$selected_model"
+
+    if [ $? -eq 0 ]; then
+        echo -e "${GREEN}Impresora '${pname}' agregada y habilitada.${NC}"
+        sudo cupsenable "$pname" 2>/dev/null
+        sudo cupsaccept "$pname" 2>/dev/null
+    else
+        echo -e "${RED}Error al agregar la impresora.${NC}"
+    fi
+}
+
+# ==========================================
+# 3. AGREGAR HOJA CUSTOM
+# ==========================================
+add_custom_size() {
+    echo -e "\n${YELLOW}--- AGREGAR HOJA CUSTOM ---${NC}"
+
+    local printers
+    printers=$(list_cups_epson)
+
+    if [ -z "$printers" ]; then
+        echo -e "${RED}No hay impresoras Epson configuradas en CUPS.${NC}"
+        echo -e "Usa la opción [2] para agregar una primero."
+        return 1
+    fi
+
+    # Seleccionar impresora
+    echo -e "\n${BOLD}Impresoras Epson en CUPS:${NC}"
+    local i=1
+    local parr=()
+    while IFS= read -r p; do
+        parr+=("$p")
+        echo -e "  [${BOLD}${i}${NC}] $p"
+        ((i++))
+    done <<< "$printers"
+
+    local selected
+    if [ "${#parr[@]}" -eq 1 ]; then
+        selected="${parr[0]}"
+        echo -e "\n  ${CYAN}→ Seleccionada automáticamente: ${BOLD}${selected}${NC}"
+    else
+        echo -ne "\n${BOLD}Selecciona impresora > ${NC}"
+        read -r psel
+        selected="${parr[$((psel-1))]}"
+    fi
+
+    local ppd="/etc/cups/ppd/${selected}.ppd"
+    if [ ! -f "$ppd" ]; then
+        echo -e "${RED}No se encontró PPD: $ppd${NC}"
+        return 1
+    fi
+
+    # Pedir dimensiones
+    echo -e ""
+    echo -e "${CYAN}Introduce las dimensiones de la hoja en milímetros.${NC}"
+    echo -e "${CYAN}Ejemplos: 100x150, 130x180, 210x330...${NC}"
+    echo -e ""
+    echo -ne "${BOLD}Ancho (mm): ${NC}"
+    read -r width_mm
+    echo -ne "${BOLD}Alto  (mm): ${NC}"
+    read -r height_mm
+
+    # Validar
+    if [[ ! "$width_mm" =~ ^[0-9]+([.][0-9]+)?$ ]] || [[ ! "$height_mm" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+        echo -e "${RED}Dimensiones inválidas. Usa solo números (ej: 100, 150.5).${NC}"
+        return 1
+    fi
+
+    echo -e ""
+    echo -ne "${BOLD}¿Agregar también versión sin bordes (borderless)? [S/n]: ${NC}"
+    read -r add_borderless
+
+    # Calcular puntos
+    local w_pt=$(mm2pt "$width_mm")
+    local h_pt=$(mm2pt "$height_mm")
+    local w_margin=$(awk "BEGIN { printf \"%.2f\", $w_pt - 8.40 }")
+    local h_margin=$(awk "BEGIN { printf \"%.2f\", $h_pt - 8.40 }")
+
+    # Nombres internos
+    local size_name="C${width_mm}x${height_mm}"
+    local size_label="${width_mm} x ${height_mm} mm (Custom)"
+    local bsize_name="TC${width_mm}x${height_mm}"
+    local bsize_label="${width_mm} x ${height_mm} mm (Custom, Sin bordes)"
+
+    # Copiar PPD a temp para editar
+    local tmpppd=$(mktemp)
+    sudo cp "$ppd" "$tmpppd"
+    chmod 644 "$tmpppd"
+
+    # Verificar si ya existe
+    if grep -q "\*PageSize ${size_name}/" "$tmpppd"; then
+        echo -e "${YELLOW}El tamaño ${width_mm}x${height_mm}mm ya existe en el PPD.${NC}"
+        rm -f "$tmpppd"
+        return 0
+    fi
+
+    # --- Insertar tamaño normal ---
+    insert_before '*CloseUI: *PageSize' \
+        "*PageSize ${size_name}/${size_label}: \"<</PageSize[${w_pt} ${h_pt}]/ImagingBBox null>>setpagedevice\"" \
+        "$tmpppd"
+
+    insert_before '*CloseUI: *PageRegion' \
+        "*PageRegion ${size_name}/${size_label}: \"<</PageRegion[${w_pt} ${h_pt}]/ImagingBBox null>>setpagedevice\"" \
+        "$tmpppd"
+
+    insert_before '*DefaultPaperDimension' \
+        "*ImageableArea ${size_name}/${size_label}: \"8.40 8.40 ${w_margin} ${h_margin}\"" \
+        "$tmpppd"
+
+    insert_before '*DefaultFont' \
+        "*PaperDimension ${size_name}/${size_label}: \"${w_pt} ${h_pt}\"" \
+        "$tmpppd"
+
+    echo -e "  ${GREEN}+${NC} ${size_name} (${width_mm} x ${height_mm} mm)"
+
+    # --- Insertar versión borderless ---
+    if [[ -z "$add_borderless" || "$add_borderless" =~ ^[sS]$ ]]; then
+        # Compensar borde inferior: la impresora frena ~3mm antes en tamaños custom
+        local extra_pt=$(mm2pt "$BORDERLESS_EXTRA_MM")
+        local bh_pt=$(awk "BEGIN { printf \"%.2f\", $h_pt + $extra_pt }")
+
+        insert_before '*CloseUI: *PageSize' \
+            "*PageSize ${bsize_name}/${bsize_label}: \"<</PageSize[${w_pt} ${bh_pt}]/ImagingBBox null>>setpagedevice\"" \
+            "$tmpppd"
+
+        insert_before '*CloseUI: *PageRegion' \
+            "*PageRegion ${bsize_name}/${bsize_label}: \"<</PageRegion[${w_pt} ${bh_pt}]/ImagingBBox null>>setpagedevice\"" \
+            "$tmpppd"
+
+        insert_before '*DefaultPaperDimension' \
+            "*ImageableArea ${bsize_name}/${bsize_label}: \"0.00 0.00 ${w_pt} ${bh_pt}\"" \
+            "$tmpppd"
+
+        insert_before '*DefaultFont' \
+            "*PaperDimension ${bsize_name}/${bsize_label}: \"${w_pt} ${bh_pt}\"" \
+            "$tmpppd"
+
+        echo -e "  ${GREEN}+${NC} ${bsize_name} (${width_mm} x ${height_mm} mm, sin bordes)"
+        echo -e "      ${CYAN}(+${BORDERLESS_EXTRA_MM}mm de compensación en alto para borde inferior)${NC}"
+    fi
+
+    # Aplicar cambios
+    echo -e "\n${CYAN}Aplicando cambios al PPD...${NC}"
+    sudo cp "$tmpppd" "$ppd"
+    rm -f "$tmpppd"
+
+    echo -e "${CYAN}Reiniciando CUPS...${NC}"
+    sudo systemctl restart cups
+
+    echo -e "\n${GREEN}¡Listo! Nuevos tamaños disponibles en ${selected}.${NC}"
+}
+
+# ==========================================
+# 4. VER HOJAS CUSTOM
+# ==========================================
+list_custom_sizes() {
+    echo -e "\n${YELLOW}--- HOJAS CUSTOM CONFIGURADAS ---${NC}"
+
+    local printers
+    printers=$(list_cups_epson)
+
+    if [ -z "$printers" ]; then
+        echo -e "${RED}No hay impresoras Epson en CUPS.${NC}"
+        return 1
+    fi
+
+    while IFS= read -r printer; do
+        local ppd="/etc/cups/ppd/${printer}.ppd"
+        echo -e "\n  ${BOLD}${printer}:${NC}"
+
+        local customs
+        customs=$(sudo grep '^\*PageSize [T]*C[0-9]' "$ppd" 2>/dev/null)
+
+        if [ -z "$customs" ]; then
+            echo -e "    ${YELLOW}(sin hojas custom)${NC}"
+        else
+            while IFS= read -r line; do
+                local name=$(echo "$line" | sed 's/\*PageSize \([^/]*\)\/.*/\1/')
+                local label=$(echo "$line" | sed 's/.*\/\([^:]*\):.*/\1/')
+                local icon="📄"
+                [[ "$name" == T* ]] && icon="🖼️ "
+                echo -e "    ${icon} ${BOLD}${name}${NC} → ${label}"
+            done <<< "$customs"
+        fi
+    done <<< "$printers"
+}
+
+# ==========================================
+# 5. ELIMINAR HOJA CUSTOM
+# ==========================================
+remove_custom_size() {
+    echo -e "\n${YELLOW}--- ELIMINAR HOJA CUSTOM ---${NC}"
+
+    local printers
+    printers=$(list_cups_epson)
+
+    if [ -z "$printers" ]; then
+        echo -e "${RED}No hay impresoras Epson en CUPS.${NC}"
+        return 1
+    fi
+
+    # Seleccionar impresora
+    echo -e "\n${BOLD}Impresoras Epson en CUPS:${NC}"
+    local i=1
+    local parr=()
+    while IFS= read -r p; do
+        parr+=("$p")
+        echo -e "  [${BOLD}${i}${NC}] $p"
+        ((i++))
+    done <<< "$printers"
+
+    local selected
+    if [ "${#parr[@]}" -eq 1 ]; then
+        selected="${parr[0]}"
+    else
+        echo -ne "\n${BOLD}Selecciona impresora > ${NC}"
+        read -r psel
+        selected="${parr[$((psel-1))]}"
+    fi
+
+    local ppd="/etc/cups/ppd/${selected}.ppd"
+
+    # Listar customs (sin el prefijo T para agrupar)
+    local base_sizes
+    base_sizes=$(sudo grep '^\*PageSize C[0-9]' "$ppd" 2>/dev/null | sed 's/\*PageSize \([^/]*\)\/.*/\1/')
+
+    if [ -z "$base_sizes" ]; then
+        echo -e "${YELLOW}No hay hojas custom para eliminar.${NC}"
+        return 0
+    fi
+
+    echo -e "\n${BOLD}Hojas custom:${NC}"
+    local j=1
+    local sarr=()
+    while IFS= read -r s; do
+        sarr+=("$s")
+        local label=$(sudo grep "^\*PageSize ${s}/" "$ppd" | sed 's/.*\/\([^:]*\):.*/\1/')
+        echo -e "  [${BOLD}${j}${NC}] ${s} → ${label}"
+        ((j++))
+    done <<< "$base_sizes"
+
+    echo -ne "\n${BOLD}Selecciona hoja a eliminar > ${NC}"
+    read -r ssel
+
+    if [[ ! "$ssel" =~ ^[0-9]+$ ]] || [ "$ssel" -lt 1 ] || [ "$ssel" -gt "${#sarr[@]}" ]; then
+        echo -e "${RED}Selección inválida.${NC}"
+        return 1
+    fi
+
+    local to_remove="${sarr[$((ssel-1))]}"
+    local to_remove_b="T${to_remove}"
+
+    echo -ne "${RED}¿Eliminar ${to_remove} (y su versión borderless)? [s/N]: ${NC}"
+    read -r confirm
+    [[ ! "$confirm" =~ ^[sS]$ ]] && return 0
+
+    local tmpppd=$(mktemp)
+    sudo cp "$ppd" "$tmpppd"
+    chmod 644 "$tmpppd"
+
+    # Eliminar todas las líneas que referencien este tamaño
+    grep -v "\*PageSize ${to_remove}/" "$tmpppd" | \
+    grep -v "\*PageSize ${to_remove_b}/" | \
+    grep -v "\*PageRegion ${to_remove}/" | \
+    grep -v "\*PageRegion ${to_remove_b}/" | \
+    grep -v "\*ImageableArea ${to_remove}/" | \
+    grep -v "\*ImageableArea ${to_remove_b}/" | \
+    grep -v "\*PaperDimension ${to_remove}/" | \
+    grep -v "\*PaperDimension ${to_remove_b}/" > "${tmpppd}.clean"
+
+    sudo cp "${tmpppd}.clean" "$ppd"
+    rm -f "$tmpppd" "${tmpppd}.clean"
+
+    echo -e "${CYAN}Reiniciando CUPS...${NC}"
+    sudo systemctl restart cups
+    echo -e "${GREEN}Tamaño ${to_remove} eliminado.${NC}"
+}
+
+# ==========================================
+# MENÚ PRINCIPAL
+# ==========================================
+
+clear
+echo -e "${BLUE}${BOLD}==================================================${NC}"
+echo -e "           ${YELLOW}${BOLD}GESTIÓN DE IMPRESORAS EPSON${NC}"
+echo -e "${BLUE}${BOLD}==================================================${NC}"
+
+# --- Status ---
+echo -e ""
+if check_driver; then
+    echo -e "  Driver:  ${GREEN}$DRIVER_PKG instalado${NC}"
+else
+    echo -e "  Driver:  ${RED}No instalado${NC}"
+fi
+
+local_printers=$(list_cups_epson)
+if [ -n "$local_printers" ]; then
+    echo -e "  CUPS:    ${GREEN}$(echo "$local_printers" | wc -l) impresora(s) Epson${NC}"
+    while IFS= read -r p; do
+        echo -e "           ${CYAN}→ $p${NC}"
+    done <<< "$local_printers"
+else
+    echo -e "  CUPS:    ${YELLOW}Sin impresoras Epson configuradas${NC}"
+fi
+
+echo -e ""
+echo -e "  [${BOLD}1${NC}] Instalar/Verificar driver (escpr2)"
+echo -e "  [${BOLD}2${NC}] Detectar y agregar impresora (Red/USB)"
+echo -e "  [${BOLD}3${NC}] ${BOLD}Agregar hoja custom${NC} (con/sin bordes)"
+echo -e "  [${BOLD}4${NC}] Ver hojas custom configuradas"
+echo -e "  [${BOLD}5${NC}] Eliminar hoja custom"
+echo -e "  [${BOLD}q${NC}] Salir"
+echo -e ""
+echo -ne "${BOLD}Opción > ${NC}"
+read -r OPT
+
+case $OPT in
+    1) install_driver ;;
+    2) add_printer ;;
+    3) add_custom_size ;;
+    4) list_custom_sizes ;;
+    5) remove_custom_size ;;
+    q|Q) exit 0 ;;
+    *) echo "Opción inválida." ;;
+esac
+
+echo -e "\nPresiona Enter para continuar..."
+read -r
