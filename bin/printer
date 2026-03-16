@@ -461,6 +461,13 @@ check_hp_plugin() {
     [ -f "/var/lib/hp/hplip.state" ] && grep -q "installed=1" /var/lib/hp/hplip.state 2>/dev/null
 }
 
+# Verificar si el plugin instalado coincide con la versión de hplip
+hp_plugin_version_ok() {
+    local hplip_ver=$(pacman -Q hplip 2>/dev/null | awk '{print $2}' | cut -d'-' -f1 | sed 's/^[0-9]*://')
+    local plugin_ver=$(grep -oP 'version=\K.*' /var/lib/hp/hplip.state 2>/dev/null)
+    [ -n "$hplip_ver" ] && [ "$hplip_ver" = "$plugin_ver" ]
+}
+
 list_cups_hp() {
     lpstat -e 2>/dev/null | while read -r printer; do
         if lpstat -v "$printer" 2>/dev/null | grep -qi "hp\|laserjet"; then
@@ -511,8 +518,18 @@ install_hp_p1102w() {
     # PASO 2: Plugin propietario (extracción manual directa, SIN hp-plugin)
     echo -e ""
     echo -e "${BOLD}[2/5] Instalando plugin propietario (extracción manual)...${NC}"
-    if check_hp_plugin; then
-        echo -e "  ${GREEN}Plugin ya instalado${NC}"
+    local need_plugin=false
+    if ! check_hp_plugin; then
+        need_plugin=true
+    elif ! hp_plugin_version_ok; then
+        local plugin_ver=$(grep -oP 'version=\K.*' /var/lib/hp/hplip.state 2>/dev/null)
+        echo -e "  ${YELLOW}Plugin v${plugin_ver:-?} desactualizado (hplip es v${installed_ver})${NC}"
+        echo -e "  ${YELLOW}Reinstalando para que coincidan...${NC}"
+        need_plugin=true
+    fi
+
+    if [ "$need_plugin" = false ]; then
+        echo -e "  ${GREEN}Plugin ya instalado (v${installed_ver})${NC}"
     else
         if [ ! -f "$plugin_file" ]; then
             echo -e "  ${RED}Plugin no encontrado: $(basename "$plugin_file")${NC}"
