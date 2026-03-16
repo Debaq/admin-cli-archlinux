@@ -1,0 +1,2059 @@
+#!/bin/bash
+# ============================================================================
+# gestionar_proyectos.sh - Gestor de dependencias de proyectos
+# Detecta automaticamente todos los proyectos en la carpeta
+# Limpia node_modules, target/ y dist/ de proyectos inactivos
+# Verifica estado git antes de cualquier limpieza
+# ============================================================================
+
+PROYECTOS_DIR="/home/nick/Escritorio/Proyectos"
+SCRIPT_NAME="$(basename "$0")"
+
+# Funcion segura para leer input del usuario
+# Usa /dev/tty si esta disponible, sino stdin normal
+leer_input() {
+    local prompt="$1"
+    local varname="$2"
+    if [ -e /dev/tty ]; then
+        read -p "$prompt" $varname < /dev/tty
+    else
+        read -p "$prompt" $varname
+    fi
+}
+ROJO='\033[0;31m'
+VERDE='\033[0;32m'
+AMARILLO='\033[1;33m'
+AZUL='\033[0;34m'
+CYAN='\033[0;36m'
+GRIS='\033[0;90m'
+NEGRITA='\033[1m'
+RESET='\033[0m'
+
+# Archivos/carpetas a ignorar (no son proyectos)
+IGNORAR_PATRONES="^(\.git|\.claude|\.vscode|node_modules|target|dist|build|__pycache__)$"
+
+# ============================================================================
+# DETECCION AUTOMATICA DE PROYECTOS
+# ============================================================================
+
+# Detecta todas las subcarpetas de primer nivel que sean proyectos
+# Ignora archivos sueltos y el propio script
+declare -a PROYECTOS_DETECTADOS=()
+declare -a PROYECTOS_NOMBRES=()
+
+detectar_proyectos() {
+    PROYECTOS_DETECTADOS=()
+    PROYECTOS_NOMBRES=()
+
+    while IFS= read -r dir; do
+        local nombre=$(basename "$dir")
+        # Ignorar archivos, carpetas ocultas, y el propio script
+        [ ! -d "$dir" ] && continue
+        [[ "$nombre" =~ ^\. ]] && continue
+        [[ "$nombre" == "$SCRIPT_NAME" ]] && continue
+
+        PROYECTOS_DETECTADOS+=("$dir")
+        PROYECTOS_NOMBRES+=("$nombre")
+    done < <(find "$PROYECTOS_DIR" -maxdepth 1 -mindepth 1 -type d | sort)
+}
+
+# ============================================================================
+# FUNCIONES GIT
+# ============================================================================
+
+tiene_git() {
+    [ -d "$1/.git" ]
+}
+
+git_cambios_pendientes() {
+    local full_path="$1"
+    if [ -d "$full_path/.git" ]; then
+        (cd "$full_path" && git status --porcelain 2>/dev/null | wc -l)
+    else
+        echo "0"
+    fi
+}
+
+git_estado_texto() {
+    local full_path="$1"
+    if [ ! -d "$full_path/.git" ]; then
+        echo "SIN GIT"
+        return
+    fi
+    local cambios=$(cd "$full_path" && git status --porcelain 2>/dev/null | wc -l)
+    if [ "$cambios" -eq 0 ]; then
+        echo "OK"
+    else
+        echo "${cambios} cambios"
+    fi
+}
+
+# Retorna: 0=seguro, 1=bloqueado (cambios pendientes), 2=sin git
+verificar_seguridad() {
+    local full_path="$1"
+    if [ ! -d "$full_path/.git" ]; then
+        return 2
+    fi
+    local cambios=$(cd "$full_path" && git status --porcelain 2>/dev/null | wc -l)
+    if [ "$cambios" -gt 0 ]; then
+        return 1
+    fi
+    return 0
+}
+
+# ============================================================================
+# FUNCIONES DE ESCANEO DE DEPENDENCIAS
+# ============================================================================
+
+# Busca node_modules en un proyecto (hasta 3 niveles de profundidad)
+encontrar_node_modules() {
+    local proyecto_path="$1"
+    find "$proyecto_path" -maxdepth 3 -name "node_modules" -type d ! -path "*/node_modules/*/node_modules" 2>/dev/null
+}
+
+# Busca target/ de Rust/Tauri
+encontrar_targets() {
+    local proyecto_path="$1"
+    find "$proyecto_path" -maxdepth 3 -name "target" -type d -exec test -f "{}/../Cargo.toml" \; -print 2>/dev/null
+}
+
+# Busca dist/ y build/ generados
+encontrar_dist() {
+    local proyecto_path="$1"
+    find "$proyecto_path" -maxdepth 3 \( -name "dist" -o -name ".next" -o -name ".nuxt" \) -type d ! -path "*/node_modules/*" 2>/dev/null
+}
+
+# Busca .venv / venv
+encontrar_venvs() {
+    local proyecto_path="$1"
+    find "$proyecto_path" -maxdepth 3 \( -name ".venv" -o -name "venv" \) -type d 2>/dev/null
+}
+
+# Busca package.json para saber donde hacer npm install
+encontrar_package_json() {
+    local proyecto_path="$1"
+    find "$proyecto_path" -maxdepth 3 -name "package.json" ! -path "*/node_modules/*" 2>/dev/null
+}
+
+# ============================================================================
+# FUNCIONES DE TAMAÑO
+# ============================================================================
+
+get_size_bytes() {
+    if [ -d "$1" ]; then
+        du -sb "$1" 2>/dev/null | cut -f1
+    else
+        echo "0"
+    fi
+}
+
+formato_bytes() {
+    local bytes=$1
+    if [ "$bytes" -ge 1073741824 ]; then
+        echo "$(echo "scale=1; $bytes/1073741824" | bc)G"
+    elif [ "$bytes" -ge 1048576 ]; then
+        echo "$(echo "scale=0; $bytes/1048576" | bc)M"
+    elif [ "$bytes" -ge 1024 ]; then
+        echo "$(echo "scale=0; $bytes/1024" | bc)K"
+    else
+        echo "${bytes}B"
+    fi
+}
+
+# Calcula espacio total de dependencias limpiables en un proyecto
+calcular_espacio_proyecto() {
+    local proyecto_path="$1"
+    local total=0
+
+    while IFS= read -r dir; do
+        [ -n "$dir" ] && total=$((total + $(get_size_bytes "$dir")))
+    done < <(encontrar_node_modules "$proyecto_path")
+
+    while IFS= read -r dir; do
+        [ -n "$dir" ] && total=$((total + $(get_size_bytes "$dir")))
+    done < <(encontrar_targets "$proyecto_path")
+
+    while IFS= read -r dir; do
+        [ -n "$dir" ] && total=$((total + $(get_size_bytes "$dir")))
+    done < <(encontrar_dist "$proyecto_path")
+
+    while IFS= read -r dir; do
+        [ -n "$dir" ] && total=$((total + $(get_size_bytes "$dir")))
+    done < <(encontrar_venvs "$proyecto_path")
+
+    echo "$total"
+}
+
+# Calcula espacio por tipo
+espacio_por_tipo() {
+    local proyecto_path="$1"
+    local tipo="$2"
+    local total=0
+
+    case "$tipo" in
+        node)
+            while IFS= read -r dir; do
+                [ -n "$dir" ] && total=$((total + $(get_size_bytes "$dir")))
+            done < <(encontrar_node_modules "$proyecto_path")
+            ;;
+        target)
+            while IFS= read -r dir; do
+                [ -n "$dir" ] && total=$((total + $(get_size_bytes "$dir")))
+            done < <(encontrar_targets "$proyecto_path")
+            ;;
+        dist)
+            while IFS= read -r dir; do
+                [ -n "$dir" ] && total=$((total + $(get_size_bytes "$dir")))
+            done < <(encontrar_dist "$proyecto_path")
+            ;;
+        venv)
+            while IFS= read -r dir; do
+                [ -n "$dir" ] && total=$((total + $(get_size_bytes "$dir")))
+            done < <(encontrar_venvs "$proyecto_path")
+            ;;
+    esac
+
+    echo "$total"
+}
+
+tiene_deps() {
+    local proyecto_path="$1"
+    local count=0
+    count=$((count + $(encontrar_node_modules "$proyecto_path" | wc -l)))
+    count=$((count + $(encontrar_targets "$proyecto_path" | wc -l)))
+    [ "$count" -gt 0 ]
+}
+
+# ============================================================================
+# MOSTRAR ESTADO
+# ============================================================================
+
+mostrar_estado() {
+    detectar_proyectos
+
+    echo ""
+    echo -e "${NEGRITA}═══════════════════════════════════════════════════════════════════════════════════${RESET}"
+    echo -e "${NEGRITA}  ESTADO DE PROYECTOS - $(df -h /home/nick | tail -1 | awk '{print "Disco: "$3" usado / "$2" total ("$5" usado)"}')${RESET}"
+    echo -e "${NEGRITA}  Detectados: ${#PROYECTOS_DETECTADOS[@]} proyectos en $PROYECTOS_DIR${RESET}"
+    echo -e "${NEGRITA}═══════════════════════════════════════════════════════════════════════════════════${RESET}"
+    echo ""
+
+    printf "  ${NEGRITA}%-4s %-24s %-12s %-10s %-10s %-8s %-10s${RESET}\n" "#" "PROYECTO" "GIT" "MODULES" "TARGET" "DIST" "TOTAL"
+    echo -e "  ${GRIS}────────────────────────────────────────────────────────────────────────────────${RESET}"
+
+    local total_general=0
+    local sin_git_count=0
+    local con_cambios_count=0
+    local sin_deps_count=0
+
+    for i in "${!PROYECTOS_DETECTADOS[@]}"; do
+        local proyecto_path="${PROYECTOS_DETECTADOS[$i]}"
+        local nombre="${PROYECTOS_NOMBRES[$i]}"
+        local num=$((i + 1))
+
+        # Calcular espacio por tipo
+        local node_bytes=$(espacio_por_tipo "$proyecto_path" "node")
+        local target_bytes=$(espacio_por_tipo "$proyecto_path" "target")
+        local dist_bytes=$(espacio_por_tipo "$proyecto_path" "dist")
+        local total_bytes=$((node_bytes + target_bytes + dist_bytes))
+        total_general=$((total_general + total_bytes))
+
+        # Si no tiene nada limpiable, saltar
+        if [ "$total_bytes" -eq 0 ]; then
+            sin_deps_count=$((sin_deps_count + 1))
+            continue
+        fi
+
+        # Estado git
+        local git_texto=$(git_estado_texto "$proyecto_path")
+        local git_color="$VERDE"
+        if [ "$git_texto" = "SIN GIT" ]; then
+            git_color="$ROJO"
+            sin_git_count=$((sin_git_count + 1))
+        elif [ "$git_texto" != "OK" ]; then
+            git_color="$AMARILLO"
+            con_cambios_count=$((con_cambios_count + 1))
+        fi
+
+        # Color de la fila basado en espacio
+        local color="$VERDE"
+        if [ "$total_bytes" -ge 10737418240 ]; then
+            color="$ROJO"
+        elif [ "$total_bytes" -ge 1073741824 ]; then
+            color="$AMARILLO"
+        fi
+
+        # Textos de tamaño
+        local node_txt="-"
+        local target_txt="-"
+        local dist_txt="-"
+        [ "$node_bytes" -gt 0 ] && node_txt=$(formato_bytes $node_bytes)
+        [ "$target_bytes" -gt 0 ] && target_txt=$(formato_bytes $target_bytes)
+        [ "$dist_bytes" -gt 0 ] && dist_txt=$(formato_bytes $dist_bytes)
+
+        # Truncar nombre si es muy largo
+        local nombre_display="$nombre"
+        [ ${#nombre_display} -gt 23 ] && nombre_display="${nombre_display:0:20}..."
+
+        printf "  ${color}%-4s %-24s${RESET} ${git_color}%-12s${RESET} ${color}%-10s %-10s %-8s %-10s${RESET}\n" \
+            "$num)" "$nombre_display" "$git_texto" "$node_txt" "$target_txt" "$dist_txt" "$(formato_bytes $total_bytes)"
+    done
+
+    echo -e "  ${GRIS}────────────────────────────────────────────────────────────────────────────────${RESET}"
+    printf "  ${NEGRITA}%-4s %-24s %-12s %-10s %-10s %-8s %-10s${RESET}\n" "" "TOTAL RECUPERABLE" "" "" "" "" "$(formato_bytes $total_general)"
+    echo ""
+    echo -e "  ${GRIS}($sin_deps_count proyectos sin dependencias limpiables - no mostrados)${RESET}"
+
+    # Advertencias
+    if [ "$sin_git_count" -gt 0 ]; then
+        echo -e "  ${ROJO}ALERTA: $sin_git_count proyecto(s) SIN GIT - limpieza requiere confirmacion extra${RESET}"
+    fi
+    if [ "$con_cambios_count" -gt 0 ]; then
+        echo -e "  ${AMARILLO}AVISO: $con_cambios_count proyecto(s) con cambios sin commitear - limpieza BLOQUEADA${RESET}"
+    fi
+
+    # Stores compartidos
+    local tiene_stores=false
+    local pnpm_store_size=0
+    local cargo_store_size=0
+
+    if check_pnpm_instalado; then
+        local store_path=$(pnpm store path 2>/dev/null)
+        if [ -n "$store_path" ] && [ -d "$store_path" ]; then
+            pnpm_store_size=$(get_size_bytes "$store_path")
+            tiene_stores=true
+        fi
+    fi
+
+    if [ -n "$CARGO_TARGET_DIR" ] && [ -d "$CARGO_TARGET_DIR" ]; then
+        cargo_store_size=$(get_size_bytes "$CARGO_TARGET_DIR")
+        tiene_stores=true
+    elif [ -d "$CARGO_TARGET_COMPARTIDO" ]; then
+        cargo_store_size=$(get_size_bytes "$CARGO_TARGET_COMPARTIDO")
+        tiene_stores=true
+    fi
+
+    if $tiene_stores; then
+        local stores_total=$((pnpm_store_size + cargo_store_size))
+        echo ""
+        echo -e "  ${NEGRITA}STORES COMPARTIDOS:${RESET} $(formato_bytes $stores_total) total"
+        [ "$pnpm_store_size" -gt 0 ] && echo -e "    ${CYAN}pnpm store:${RESET}   $(formato_bytes $pnpm_store_size)"
+        [ "$cargo_store_size" -gt 0 ] && echo -e "    ${CYAN}cargo target:${RESET} $(formato_bytes $cargo_store_size)"
+    fi
+
+    echo ""
+}
+
+# ============================================================================
+# LIMPIAR PROYECTO
+# ============================================================================
+
+LIMPIAR_RESULTADO=0
+
+limpiar_proyecto() {
+    local proyecto_path="$1"
+    local nombre="$2"
+    local solo_tipo="${3:-all}"  # all, node, target, dist
+    local liberado=0
+    LIMPIAR_RESULTADO=0
+
+    # ── VERIFICACION GIT OBLIGATORIA ──
+    verificar_seguridad "$proyecto_path"
+    local seguridad=$?
+
+    if [ "$seguridad" -eq 1 ]; then
+        local cambios=$(git_cambios_pendientes "$proyecto_path")
+        echo -e "  ${ROJO}BLOQUEADO: ${nombre} tiene ${cambios} cambio(s) sin commitear${RESET}"
+        (cd "$proyecto_path" && git status --porcelain 2>/dev/null | head -5 | while read linea; do
+            echo -e "    ${GRIS}$linea${RESET}"
+        done)
+        [ "$cambios" -gt 5 ] && echo -e "    ${GRIS}... y $((cambios - 5)) mas${RESET}"
+        echo ""
+        echo -e "  ${NEGRITA}Opciones:${RESET}"
+        echo -e "  ${CYAN}c)${RESET} Auto-commit con IA y luego limpiar"
+        echo -e "  ${CYAN}s)${RESET} Stash (guardar cambios temporalmente) y limpiar"
+        echo -e "  ${CYAN}n)${RESET} Saltar este proyecto"
+        leer_input "  > " resp_bloqueo
+
+        case "$resp_bloqueo" in
+            c|C)
+                # Detectar IA disponible
+                local ias=$(detectar_ias_disponibles)
+                if [ -z "$ias" ]; then
+                    echo -e "  ${ROJO}No hay IA CLI disponible (claude/gemini)${RESET}"
+                    return
+                fi
+
+                # Elegir IA rapido
+                local ias_arr=($ias)
+                local ai_usar=""
+                if [ ${#ias_arr[@]} -eq 1 ]; then
+                    ai_usar="${ias_arr[0]}"
+                else
+                    leer_input "  Usar cual? (${ias// //}) [${ias_arr[0]}]: " ai_resp
+                    ai_usar="${ai_resp:-${ias_arr[0]}}"
+                    local v=false
+                    for ia in "${ias_arr[@]}"; do [ "$ai_usar" = "$ia" ] && v=true; done
+                    $v || ai_usar="${ias_arr[0]}"
+                fi
+
+                # Hacer auto-commit
+                if auto_commit_proyecto "$proyecto_path" "$nombre" "$ai_usar"; then
+                    echo -e "  ${VERDE}Commit exitoso, continuando con limpieza...${RESET}"
+                else
+                    echo -e "  ${ROJO}Commit fallido, saltando limpieza${RESET}"
+                    return
+                fi
+                ;;
+            s|S)
+                echo -e "  ${AZUL}Guardando cambios en stash...${RESET}"
+                local stash_output
+                stash_output=$(cd "$proyecto_path" && git stash push -m "auto-stash por gestionar_proyectos.sh" 2>&1)
+                if [ $? -eq 0 ]; then
+                    echo -e "  ${VERDE}Stash guardado. Recuperar despues con:${RESET}"
+                    echo -e "  ${GRIS}  cd \"$proyecto_path\" && git stash pop${RESET}"
+                else
+                    echo -e "  ${ROJO}Error en stash: $stash_output${RESET}"
+                    return
+                fi
+                ;;
+            *)
+                echo -e "  ${GRIS}${nombre}: omitido${RESET}"
+                return
+                ;;
+        esac
+    fi
+
+    if [ "$seguridad" -eq 2 ]; then
+        echo -e "  ${ROJO}ALERTA: ${nombre} NO tiene git inicializado${RESET}"
+        echo -e "  ${ROJO}  Si borras dependencias y algo sale mal, no hay respaldo${RESET}"
+        leer_input "  Continuar de todas formas? (escribe SI para confirmar): " confirmacion
+        if [ "$confirmacion" != "SI" ]; then
+            echo -e "  ${GRIS}${nombre}: omitido${RESET}"
+            return
+        fi
+    fi
+
+    echo -e "  ${AMARILLO}Limpiando ${nombre}...${RESET}"
+
+    # Limpiar node_modules
+    if [ "$solo_tipo" = "all" ] || [ "$solo_tipo" = "node" ]; then
+        while IFS= read -r dir; do
+            if [ -n "$dir" ] && [ -d "$dir" ]; then
+                local size=$(get_size_bytes "$dir")
+                liberado=$((liberado + size))
+                local rel_path="${dir#$PROYECTOS_DIR/}"
+                rm -rf "$dir"
+                echo -e "    ${GRIS}rm $rel_path ($(formato_bytes $size))${RESET}"
+            fi
+        done < <(encontrar_node_modules "$proyecto_path")
+    fi
+
+    # Limpiar target/
+    if [ "$solo_tipo" = "all" ] || [ "$solo_tipo" = "target" ]; then
+        while IFS= read -r dir; do
+            if [ -n "$dir" ] && [ -d "$dir" ]; then
+                local size=$(get_size_bytes "$dir")
+                liberado=$((liberado + size))
+                local rel_path="${dir#$PROYECTOS_DIR/}"
+                rm -rf "$dir"
+                echo -e "    ${GRIS}rm $rel_path ($(formato_bytes $size))${RESET}"
+            fi
+        done < <(encontrar_targets "$proyecto_path")
+    fi
+
+    # Limpiar dist/
+    if [ "$solo_tipo" = "all" ] || [ "$solo_tipo" = "dist" ]; then
+        while IFS= read -r dir; do
+            if [ -n "$dir" ] && [ -d "$dir" ]; then
+                local size=$(get_size_bytes "$dir")
+                liberado=$((liberado + size))
+                local rel_path="${dir#$PROYECTOS_DIR/}"
+                rm -rf "$dir"
+                echo -e "    ${GRIS}rm $rel_path ($(formato_bytes $size))${RESET}"
+            fi
+        done < <(encontrar_dist "$proyecto_path")
+    fi
+
+    # Limpiar venv
+    if [ "$solo_tipo" = "all" ]; then
+        while IFS= read -r dir; do
+            if [ -n "$dir" ] && [ -d "$dir" ]; then
+                local size=$(get_size_bytes "$dir")
+                liberado=$((liberado + size))
+                local rel_path="${dir#$PROYECTOS_DIR/}"
+                rm -rf "$dir"
+                echo -e "    ${GRIS}rm $rel_path ($(formato_bytes $size))${RESET}"
+            fi
+        done < <(encontrar_venvs "$proyecto_path")
+    fi
+
+    if [ "$liberado" -gt 0 ]; then
+        echo -e "  ${VERDE}${nombre}: $(formato_bytes $liberado) liberados${RESET}"
+    else
+        echo -e "  ${GRIS}${nombre}: nada que limpiar${RESET}"
+    fi
+    LIMPIAR_RESULTADO=$liberado
+}
+
+# ============================================================================
+# INSTALAR DEPENDENCIAS
+# ============================================================================
+
+instalar_proyecto() {
+    local proyecto_path="$1"
+    local nombre="$2"
+
+    # ── Detectar que necesita este proyecto ──
+    local tiene_node=false
+    local tiene_rust=false
+    find "$proyecto_path" -maxdepth 3 -name "package.json" ! -path "*/node_modules/*" 2>/dev/null | grep -q . && tiene_node=true
+    find "$proyecto_path" -maxdepth 3 -name "Cargo.toml" 2>/dev/null | grep -q . && tiene_rust=true
+
+    # ── Ofrecer optimizaciones si no estan configuradas ──
+    local ofrecio_algo=false
+
+    # Node: ofrecer pnpm si usa npm
+    if $tiene_node && ! command -v pnpm &>/dev/null; then
+        ofrecio_algo=true
+        echo ""
+        echo -e "  ${AMARILLO}pnpm no esta instalado.${RESET} Usa un store global con hardlinks"
+        echo -e "  ${GRIS}que ahorra 50-70% de espacio en node_modules.${RESET}"
+        leer_input "  Instalar pnpm antes de continuar? (s/n): " resp
+        if [ "$resp" = "s" ] || [ "$resp" = "S" ]; then
+            echo -e "  ${AZUL}Instalando pnpm...${RESET}"
+            sudo npm install -g pnpm 2>&1 | tail -2
+            command -v pnpm &>/dev/null && echo -e "  ${VERDE}pnpm instalado (v$(pnpm --version))${RESET}"
+        fi
+    fi
+
+    # Node: ofrecer migrar de npm a pnpm si ya tiene pnpm pero el proyecto usa npm
+    if $tiene_node && command -v pnpm &>/dev/null; then
+        local tiene_npm_lock=false
+        find "$proyecto_path" -maxdepth 3 -name "package-lock.json" ! -path "*/node_modules/*" 2>/dev/null | grep -q . && tiene_npm_lock=true
+
+        local tiene_pnpm_lock=false
+        find "$proyecto_path" -maxdepth 3 -name "pnpm-lock.yaml" ! -path "*/node_modules/*" 2>/dev/null | grep -q . && tiene_pnpm_lock=true
+
+        if $tiene_npm_lock && ! $tiene_pnpm_lock; then
+            ofrecio_algo=true
+            echo ""
+            echo -e "  ${AMARILLO}$nombre usa npm pero tenes pnpm disponible.${RESET}"
+            echo -e "  ${GRIS}Migrar a pnpm ahorra espacio via store compartido.${RESET}"
+            echo -e "  ${GRIS}No modifica package.json, quien clone puede seguir usando npm.${RESET}"
+            leer_input "  Migrar $nombre a pnpm? (s/n): " resp
+            if [ "$resp" = "s" ] || [ "$resp" = "S" ]; then
+                while IFS= read -r lockfile; do
+                    [ -z "$lockfile" ] && continue
+                    local pkg_dir=$(dirname "$lockfile")
+                    local rel="${pkg_dir#$PROYECTOS_DIR/}"
+                    echo -e "    ${AZUL}pnpm import en $rel...${RESET}"
+                    (cd "$pkg_dir" && pnpm import 2>/dev/null)
+                    echo -e "    ${VERDE}Migrado${RESET}"
+                done < <(find "$proyecto_path" -maxdepth 3 -name "package-lock.json" ! -path "*/node_modules/*" 2>/dev/null)
+            fi
+        fi
+    fi
+
+    # Rust: ofrecer CARGO_TARGET_DIR compartido
+    if $tiene_rust && [ -z "$CARGO_TARGET_DIR" ] && ! grep -q "CARGO_TARGET_DIR" "$HOME/.bashrc" 2>/dev/null && ! grep -q "CARGO_TARGET_DIR" "$HOME/.zshrc" 2>/dev/null; then
+        ofrecio_algo=true
+        echo ""
+        echo -e "  ${AMARILLO}$nombre usa Rust/Tauri pero no tenes CARGO_TARGET_DIR compartido.${RESET}"
+        echo -e "  ${GRIS}Sin esto, cada proyecto compila sus propias deps (~15-35G por proyecto).${RESET}"
+        echo -e "  ${GRIS}Con target compartido, las deps comunes se compilan una sola vez.${RESET}"
+        leer_input "  Configurar CARGO_TARGET_DIR compartido? (s/n): " resp
+        if [ "$resp" = "s" ] || [ "$resp" = "S" ]; then
+            configurar_cargo_target
+        fi
+    fi
+
+    $ofrecio_algo && echo ""
+
+    # ── Instalar dependencias ──
+    echo -e "  ${AZUL}Instalando dependencias de ${nombre}...${RESET}"
+
+    # Node
+    while IFS= read -r pkg; do
+        if [ -n "$pkg" ]; then
+            local pkg_dir=$(dirname "$pkg")
+            local rel="${pkg_dir#$PROYECTOS_DIR/}"
+
+            if [ -f "$pkg_dir/pnpm-lock.yaml" ] && command -v pnpm &>/dev/null; then
+                echo -e "    ${GRIS}pnpm install en $rel${RESET}"
+                (cd "$pkg_dir" && pnpm install --silent 2>&1 | tail -1)
+            elif command -v pnpm &>/dev/null && [ ! -f "$pkg_dir/package-lock.json" ]; then
+                echo -e "    ${GRIS}pnpm install en $rel${RESET}"
+                (cd "$pkg_dir" && pnpm install --silent 2>&1 | tail -1)
+            else
+                echo -e "    ${GRIS}npm install en $rel${RESET}"
+                (cd "$pkg_dir" && npm install --silent 2>&1 | tail -1)
+            fi
+        fi
+    done < <(encontrar_package_json "$proyecto_path")
+
+    echo -e "  ${VERDE}${nombre}: dependencias instaladas${RESET}"
+}
+
+# Detecta scripts disponibles en package.json de un proyecto
+# Retorna lineas con formato: directorio|comando|descripcion
+detectar_comandos_lanzamiento() {
+    local proyecto_path="$1"
+    local comandos=()
+
+    # Buscar scripts en package.json (raiz y subdirectorios)
+    while IFS= read -r pkg; do
+        [ -z "$pkg" ] && continue
+        local pkg_dir=$(dirname "$pkg")
+        local rel="${pkg_dir#$PROYECTOS_DIR/}"
+        [ "$pkg_dir" = "$proyecto_path" ] && rel="."
+
+        # Extraer scripts comunes con sed (dev, start, serve, preview)
+        for script in dev start serve preview; do
+            if grep -q "\"$script\"" "$pkg" 2>/dev/null; then
+                local manager="npm"
+                [ -f "$pkg_dir/pnpm-lock.yaml" ] && manager="pnpm"
+                comandos+=("$pkg_dir|$manager run $script|$rel ($script)")
+            fi
+        done
+    done < <(encontrar_package_json "$proyecto_path")
+
+    # Buscar Cargo.toml (Rust/Tauri)
+    while IFS= read -r cargo; do
+        [ -z "$cargo" ] && continue
+        local cargo_dir=$(dirname "$cargo")
+        local rel="${cargo_dir#$PROYECTOS_DIR/}"
+
+        # Si tiene tauri, ofrecer cargo tauri dev
+        if grep -q "tauri" "$cargo" 2>/dev/null || [ -f "$cargo_dir/tauri.conf.json" ] || [ -d "$cargo_dir/src-tauri" ]; then
+            comandos+=("$cargo_dir|cargo tauri dev|$rel (tauri dev)")
+        else
+            comandos+=("$cargo_dir|cargo run|$rel (cargo run)")
+        fi
+    done < <(find "$proyecto_path" -maxdepth 3 -name "Cargo.toml" ! -path "*/target/*" 2>/dev/null)
+
+    for cmd in "${comandos[@]}"; do
+        echo "$cmd"
+    done
+}
+
+# Ofrece lanzar un proyecto tras activarlo
+ofrecer_lanzar_proyecto() {
+    local proyecto_path="$1"
+    local nombre="$2"
+
+    local comandos=()
+    while IFS= read -r linea; do
+        [ -n "$linea" ] && comandos+=("$linea")
+    done < <(detectar_comandos_lanzamiento "$proyecto_path")
+
+    [ ${#comandos[@]} -eq 0 ] && return
+
+    echo ""
+    echo -e "  ${NEGRITA}Lanzar ${nombre}?${RESET}"
+    echo ""
+
+    for i in "${!comandos[@]}"; do
+        local num=$((i + 1))
+        local cmd=$(echo "${comandos[$i]}" | cut -d'|' -f2)
+        local desc=$(echo "${comandos[$i]}" | cut -d'|' -f3)
+        printf "  ${CYAN}%s)${RESET} %-24s ${GRIS}%s${RESET}\n" "$num" "$cmd" "$desc"
+    done
+    echo -e "  ${CYAN}n)${RESET} No lanzar"
+    echo ""
+    leer_input "  > " resp_lanzar
+
+    [ "$resp_lanzar" = "n" ] || [ -z "$resp_lanzar" ] && return
+
+    if [ "$resp_lanzar" -ge 1 ] && [ "$resp_lanzar" -le "${#comandos[@]}" ] 2>/dev/null; then
+        local idx=$((resp_lanzar - 1))
+        local dir=$(echo "${comandos[$idx]}" | cut -d'|' -f1)
+        local cmd=$(echo "${comandos[$idx]}" | cut -d'|' -f2)
+
+        echo ""
+        echo -e "  ${AZUL}Lanzando: ${cmd} en ${dir#$PROYECTOS_DIR/}${RESET}"
+        echo -e "  ${GRIS}(Ctrl+C para detener)${RESET}"
+        echo ""
+        (cd "$dir" && $cmd)
+    fi
+}
+
+# ============================================================================
+# INICIALIZAR GIT + GITHUB
+# ============================================================================
+
+# Genera un .gitignore basico segun el tipo de proyecto
+generar_gitignore() {
+    local proyecto_path="$1"
+    local gitignore="$proyecto_path/.gitignore"
+
+    # Si ya existe, no sobreescribir
+    [ -f "$gitignore" ] && return
+
+    local contenido="# Dependencias
+node_modules/
+.pnpm-store/
+
+# Build
+dist/
+build/
+.next/
+.nuxt/
+target/
+
+# Entorno
+.env
+.env.local
+.venv/
+venv/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+npm-debug.log*
+"
+
+    echo "$contenido" > "$gitignore"
+    echo -e "    ${GRIS}Generado .gitignore${RESET}"
+}
+
+# Inicializar git en un proyecto
+inicializar_git() {
+    local proyecto_path="$1"
+    local nombre="$2"
+
+    echo ""
+    echo -e "  ${NEGRITA}── Inicializar git: $nombre ──${RESET}"
+    echo ""
+
+    if [ -d "$proyecto_path/.git" ]; then
+        echo -e "  ${VERDE}Ya tiene git inicializado${RESET}"
+        local remote=$(cd "$proyecto_path" && git remote get-url origin 2>/dev/null)
+        if [ -n "$remote" ]; then
+            echo -e "  ${GRIS}Remote: $remote${RESET}"
+        else
+            echo -e "  ${AMARILLO}Sin remote configurado${RESET}"
+            echo ""
+            echo -e "  ${NEGRITA}Crear repositorio en GitHub?${RESET}"
+            leer_input "  (s/n): " resp_gh
+            if [ "$resp_gh" = "s" ] || [ "$resp_gh" = "S" ]; then
+                crear_repo_github "$proyecto_path" "$nombre"
+            fi
+        fi
+        return
+    fi
+
+    # Mostrar contenido del proyecto
+    local archivos=$(find "$proyecto_path" -maxdepth 1 -mindepth 1 | wc -l)
+    echo -e "  ${GRIS}Contenido: $archivos archivos/carpetas en raiz${RESET}"
+    ls -1 "$proyecto_path" | head -10 | while read item; do
+        echo -e "    ${GRIS}$item${RESET}"
+    done
+    [ "$archivos" -gt 10 ] && echo -e "    ${GRIS}... y $((archivos - 10)) mas${RESET}"
+    echo ""
+
+    leer_input "  Inicializar git en $nombre? (s/n): " resp_init
+    if [ "$resp_init" != "s" ] && [ "$resp_init" != "S" ]; then
+        echo -e "  ${GRIS}Omitido${RESET}"
+        return
+    fi
+
+    # Generar .gitignore si no existe
+    generar_gitignore "$proyecto_path"
+
+    # git init + primer commit
+    echo -e "  ${AZUL}Inicializando repositorio...${RESET}"
+    (cd "$proyecto_path" && git init 2>&1 | tail -1)
+    echo -e "    ${GRIS}git init OK${RESET}"
+
+    # Agregar archivos y primer commit
+    (cd "$proyecto_path" && git add -A 2>/dev/null)
+    local staged=$(cd "$proyecto_path" && git diff --cached --stat 2>/dev/null | tail -1)
+    echo -e "    ${GRIS}Staged: $staged${RESET}"
+
+    # Generar mensaje de commit inicial con IA o usar default
+    local commit_msg="chore: commit inicial de $nombre"
+    local ias=$(detectar_ias_disponibles)
+
+    if [ -n "$ias" ]; then
+        echo ""
+        leer_input "  Generar mensaje de commit inicial con IA? (s/n): " resp_ia
+        if [ "$resp_ia" = "s" ] || [ "$resp_ia" = "S" ]; then
+            local ias_arr=($ias)
+            local ai_usar="${ias_arr[0]}"
+            if [ ${#ias_arr[@]} -gt 1 ]; then
+                leer_input "  Usar cual? (${ias// //}) [${ias_arr[0]}]: " ai_resp
+                ai_usar="${ai_resp:-${ias_arr[0]}}"
+            fi
+            echo -e "  ${AZUL}Generando con $ai_usar...${RESET}"
+            local msg_ia=$(generar_mensaje_commit "$proyecto_path" "$ai_usar")
+            if [ -n "$msg_ia" ]; then
+                echo -e "  ${VERDE}$msg_ia${RESET}"
+                leer_input "  Usar este mensaje? (s/n): " resp_msg
+                if [ "$resp_msg" = "s" ] || [ "$resp_msg" = "S" ]; then
+                    commit_msg="$msg_ia"
+                fi
+            fi
+        fi
+    fi
+
+    (cd "$proyecto_path" && git commit -m "$(cat <<EOF
+$commit_msg
+EOF
+)" 2>&1) | while read linea; do
+        echo -e "    ${GRIS}$linea${RESET}"
+    done
+
+    echo -e "  ${VERDE}Git inicializado con primer commit${RESET}"
+
+    # Preguntar si crear en GitHub
+    echo ""
+    if command -v gh &>/dev/null; then
+        leer_input "  Crear repositorio en GitHub? (s/n): " resp_gh
+        if [ "$resp_gh" = "s" ] || [ "$resp_gh" = "S" ]; then
+            crear_repo_github "$proyecto_path" "$nombre"
+        fi
+    else
+        echo -e "  ${AMARILLO}gh CLI no instalada - no se puede crear repo en GitHub${RESET}"
+        echo -e "  ${GRIS}Instalar con: sudo pacman -S github-cli${RESET}"
+    fi
+}
+
+# Crear repositorio en GitHub y hacer push
+crear_repo_github() {
+    local proyecto_path="$1"
+    local nombre="$2"
+
+    echo ""
+    echo -e "  ${NEGRITA}Crear repositorio en GitHub${RESET}"
+    echo ""
+
+    # Nombre del repo
+    local repo_name="$nombre"
+    leer_input "  Nombre del repo [$repo_name]: " custom_name
+    [ -n "$custom_name" ] && repo_name="$custom_name"
+
+    # Descripcion
+    leer_input "  Descripcion (opcional): " descripcion
+
+    # Visibilidad
+    echo ""
+    echo -e "  ${CYAN}1)${RESET} Privado"
+    echo -e "  ${CYAN}2)${RESET} Publico"
+    leer_input "  Visibilidad [1]: " visibilidad
+    local vis_flag="--private"
+    local vis_texto="privado"
+    if [ "$visibilidad" = "2" ]; then
+        vis_flag="--public"
+        vis_texto="publico"
+    fi
+
+    echo ""
+    echo -e "  ${NEGRITA}Resumen:${RESET}"
+    echo -e "  ${GRIS}  Repo:    $repo_name${RESET}"
+    echo -e "  ${GRIS}  Tipo:    $vis_texto${RESET}"
+    [ -n "$descripcion" ] && echo -e "  ${GRIS}  Desc:    $descripcion${RESET}"
+    echo ""
+    leer_input "  Confirmar creacion? (s/n): " resp_confirm
+
+    if [ "$resp_confirm" != "s" ] && [ "$resp_confirm" != "S" ]; then
+        echo -e "  ${GRIS}Cancelado${RESET}"
+        return
+    fi
+
+    # Crear repo en GitHub
+    echo -e "  ${AZUL}Creando repositorio en GitHub...${RESET}"
+    local gh_args="$vis_flag --source=$proyecto_path"
+    [ -n "$descripcion" ] && gh_args="$gh_args --description=\"$descripcion\""
+
+    local gh_output
+    if [ -n "$descripcion" ]; then
+        gh_output=$(cd "$proyecto_path" && gh repo create "$repo_name" $vis_flag --description "$descripcion" --source=. --push 2>&1)
+    else
+        gh_output=$(cd "$proyecto_path" && gh repo create "$repo_name" $vis_flag --source=. --push 2>&1)
+    fi
+    local gh_exit=$?
+
+    if [ $gh_exit -eq 0 ]; then
+        local remote_url=$(cd "$proyecto_path" && git remote get-url origin 2>/dev/null)
+        echo -e "  ${VERDE}Repositorio creado y push realizado${RESET}"
+        echo -e "  ${CYAN}  $remote_url${RESET}"
+    else
+        echo -e "  ${ROJO}Error al crear repositorio:${RESET}"
+        echo -e "  ${GRIS}$gh_output${RESET}"
+
+        # Si el error es que ya existe, ofrecer conectar
+        if echo "$gh_output" | grep -qi "already exists"; then
+            echo ""
+            leer_input "  El repo ya existe. Conectar como remote y push? (s/n): " resp_connect
+            if [ "$resp_connect" = "s" ] || [ "$resp_connect" = "S" ]; then
+                local gh_user=$(gh api user -q '.login' 2>/dev/null)
+                (cd "$proyecto_path" && git remote add origin "https://github.com/$gh_user/$repo_name.git" 2>/dev/null)
+                local branch=$(cd "$proyecto_path" && git branch --show-current 2>/dev/null)
+                local push_out=$(cd "$proyecto_path" && git push -u origin "$branch" 2>&1)
+                if [ $? -eq 0 ]; then
+                    echo -e "  ${VERDE}Conectado y push realizado${RESET}"
+                else
+                    echo -e "  ${ROJO}Error en push: $push_out${RESET}"
+                fi
+            fi
+        fi
+    fi
+}
+
+# Menu para inicializar git en proyectos sin git
+menu_inicializar_git() {
+    detectar_proyectos
+
+    echo ""
+    echo -e "  ${NEGRITA}INICIALIZAR GIT EN PROYECTOS${RESET}"
+    echo -e "  ${GRIS}──────────────────────────────────────────────────────────${RESET}"
+    echo ""
+
+    # Listar proyectos sin git
+    local sin_git=()
+    local sin_git_indices=()
+    local sin_remote=()
+    local sin_remote_indices=()
+
+    for i in "${!PROYECTOS_DETECTADOS[@]}"; do
+        local p="${PROYECTOS_DETECTADOS[$i]}"
+        local nombre="${PROYECTOS_NOMBRES[$i]}"
+
+        if [ ! -d "$p/.git" ]; then
+            local num=$((${#sin_git[@]} + 1))
+            printf "  ${ROJO}%-4s %-24s SIN GIT${RESET}\n" "$num)" "$nombre"
+            sin_git+=("$p")
+            sin_git_indices+=("$i")
+        elif ! (cd "$p" && git remote 2>/dev/null | grep -q .); then
+            local num_r=$((${#sin_remote[@]} + 1))
+            local branch=$(cd "$p" && git branch --show-current 2>/dev/null)
+            sin_remote+=("$p")
+            sin_remote_indices+=("$i")
+        fi
+    done
+
+    if [ ${#sin_git[@]} -eq 0 ] && [ ${#sin_remote[@]} -eq 0 ]; then
+        echo -e "  ${VERDE}Todos los proyectos tienen git y remote configurado${RESET}"
+        return
+    fi
+
+    # Mostrar proyectos sin remote
+    if [ ${#sin_remote[@]} -gt 0 ]; then
+        echo ""
+        echo -e "  ${AMARILLO}Proyectos con git pero SIN remote:${RESET}"
+        for i in "${!sin_remote[@]}"; do
+            local orig_idx="${sin_remote_indices[$i]}"
+            local nombre="${PROYECTOS_NOMBRES[$orig_idx]}"
+            local branch=$(cd "${sin_remote[$i]}" && git branch --show-current 2>/dev/null)
+            printf "  ${AMARILLO}  %-24s [%s]${RESET}\n" "$nombre" "$branch"
+        done
+    fi
+
+    echo ""
+    echo -e "  ${NEGRITA}Opciones:${RESET}"
+    echo -e "  ${CYAN}Numeros${RESET} (ej: 1 3) para elegir proyectos sin git"
+    echo -e "  ${CYAN}todos${RESET} para inicializar todos los que no tienen git"
+    echo -e "  ${CYAN}v${RESET} para volver"
+    echo ""
+    leer_input "  > " seleccion
+
+    [ "$seleccion" = "v" ] && return
+
+    if [ "$seleccion" = "todos" ]; then
+        for i in "${!sin_git[@]}"; do
+            local orig_idx="${sin_git_indices[$i]}"
+            inicializar_git "${sin_git[$i]}" "${PROYECTOS_NOMBRES[$orig_idx]}"
+        done
+    else
+        for num in $seleccion; do
+            if [ "$num" -ge 1 ] && [ "$num" -le "${#sin_git[@]}" ] 2>/dev/null; then
+                local idx=$((num - 1))
+                local orig_idx="${sin_git_indices[$idx]}"
+                inicializar_git "${sin_git[$idx]}" "${PROYECTOS_NOMBRES[$orig_idx]}"
+            fi
+        done
+    fi
+
+    # Ofrecer configurar remotes faltantes
+    if [ ${#sin_remote[@]} -gt 0 ]; then
+        echo ""
+        leer_input "  Configurar GitHub para los proyectos sin remote? (s/n): " resp_remote
+        if [ "$resp_remote" = "s" ] || [ "$resp_remote" = "S" ]; then
+            for i in "${!sin_remote[@]}"; do
+                local orig_idx="${sin_remote_indices[$i]}"
+                crear_repo_github "${sin_remote[$i]}" "${PROYECTOS_NOMBRES[$orig_idx]}"
+            done
+        fi
+    fi
+}
+
+# ============================================================================
+# MOSTRAR GIT DETALLADO
+# ============================================================================
+
+mostrar_git_detalle() {
+    detectar_proyectos
+
+    echo ""
+    echo -e "${NEGRITA}  ESTADO GIT DE TODOS LOS PROYECTOS (${#PROYECTOS_DETECTADOS[@]} detectados)${RESET}"
+    echo -e "  ${GRIS}──────────────────────────────────────────────────────────${RESET}"
+
+    for i in "${!PROYECTOS_DETECTADOS[@]}"; do
+        local proyecto_path="${PROYECTOS_DETECTADOS[$i]}"
+        local nombre="${PROYECTOS_NOMBRES[$i]}"
+
+        if [ ! -d "$proyecto_path/.git" ]; then
+            printf "  ${ROJO}%-24s SIN GIT${RESET}\n" "$nombre"
+            echo -e "    ${GRIS}Inicializar: cd \"$proyecto_path\" && git init${RESET}"
+        else
+            local cambios=$(cd "$proyecto_path" && git status --porcelain 2>/dev/null | wc -l)
+            local branch=$(cd "$proyecto_path" && git branch --show-current 2>/dev/null)
+            local remote=$(cd "$proyecto_path" && git remote get-url origin 2>/dev/null || echo "sin remote")
+
+            if [ "$cambios" -eq 0 ]; then
+                printf "  ${VERDE}%-24s OK  ${GRIS}[%s] %s${RESET}\n" "$nombre" "$branch" "$remote"
+            else
+                printf "  ${AMARILLO}%-24s %s cambio(s)  ${GRIS}[%s]${RESET}\n" "$nombre" "$cambios" "$branch"
+                (cd "$proyecto_path" && git status --porcelain 2>/dev/null | head -5 | while read linea; do
+                    echo -e "    ${GRIS}  $linea${RESET}"
+                done)
+                [ "$cambios" -gt 5 ] && echo -e "    ${GRIS}  ... y $((cambios - 5)) mas${RESET}"
+            fi
+        fi
+    done
+    echo ""
+}
+
+# ============================================================================
+# AUTOCONFIGURACION - pnpm + CARGO_TARGET_DIR compartido
+# ============================================================================
+
+CARGO_TARGET_COMPARTIDO="$HOME/.cargo-target"
+SHELL_RC="$HOME/.bashrc"
+[ -n "$ZSH_VERSION" ] && SHELL_RC="$HOME/.zshrc"
+# Detectar zsh por archivo
+[ -f "$HOME/.zshrc" ] && [ "$(basename "$SHELL")" = "zsh" ] && SHELL_RC="$HOME/.zshrc"
+
+# --- Diagnostico del estado actual ---
+
+check_pnpm_instalado() {
+    command -v pnpm &>/dev/null
+}
+
+check_cargo_target_compartido() {
+    [ -n "$CARGO_TARGET_DIR" ] && [ "$CARGO_TARGET_DIR" = "$CARGO_TARGET_COMPARTIDO" ]
+}
+
+check_cargo_target_en_rc() {
+    grep -q "CARGO_TARGET_DIR" "$SHELL_RC" 2>/dev/null
+}
+
+# Cuenta cuantos proyectos usan npm vs pnpm
+contar_gestores_node() {
+    local npm_count=0
+    local pnpm_count=0
+    detectar_proyectos
+    for i in "${!PROYECTOS_DETECTADOS[@]}"; do
+        local p="${PROYECTOS_DETECTADOS[$i]}"
+        # Buscar package-lock.json o pnpm-lock.yaml
+        if find "$p" -maxdepth 3 -name "pnpm-lock.yaml" ! -path "*/node_modules/*" 2>/dev/null | grep -q .; then
+            pnpm_count=$((pnpm_count + 1))
+        elif find "$p" -maxdepth 3 -name "package-lock.json" ! -path "*/node_modules/*" 2>/dev/null | grep -q .; then
+            npm_count=$((npm_count + 1))
+        fi
+    done
+    echo "$npm_count $pnpm_count"
+}
+
+# --- Acciones de configuracion ---
+
+configurar_pnpm() {
+    echo ""
+    echo -e "  ${NEGRITA}CONFIGURAR pnpm (store global de dependencias Node)${RESET}"
+    echo -e "  ${GRIS}──────────────────────────────────────────────────────────${RESET}"
+    echo ""
+
+    if check_pnpm_instalado; then
+        local version=$(pnpm --version 2>/dev/null)
+        echo -e "  ${VERDE}pnpm ya esta instalado (v$version)${RESET}"
+    else
+        echo -e "  ${AMARILLO}pnpm no esta instalado${RESET}"
+        echo -e "  ${GRIS}pnpm usa un store global con hardlinks: si 10 proyectos usan react,${RESET}"
+        echo -e "  ${GRIS}se descarga UNA vez y se linkea. Ahorro tipico: 50-70% de espacio.${RESET}"
+        echo -e "  ${GRIS}Los repos siguen funcionando normal para quien los clone con npm.${RESET}"
+        echo ""
+        leer_input "  Instalar pnpm? (s/n): " resp
+        if [ "$resp" = "s" ] || [ "$resp" = "S" ]; then
+            echo -e "  ${AZUL}Instalando pnpm...${RESET}"
+            if command -v npm &>/dev/null; then
+                sudo npm install -g pnpm 2>&1 | tail -3
+            else
+                curl -fsSL https://get.pnpm.io/install.sh | sh - 2>&1 | tail -3
+            fi
+
+            if check_pnpm_instalado; then
+                echo -e "  ${VERDE}pnpm instalado correctamente (v$(pnpm --version))${RESET}"
+            else
+                echo -e "  ${ROJO}Error al instalar pnpm${RESET}"
+                return
+            fi
+        else
+            return
+        fi
+    fi
+
+    echo ""
+    local counts=$(contar_gestores_node)
+    local npm_count=$(echo "$counts" | cut -d' ' -f1)
+    local pnpm_count=$(echo "$counts" | cut -d' ' -f2)
+    echo -e "  Proyectos con npm:  ${AMARILLO}$npm_count${RESET}"
+    echo -e "  Proyectos con pnpm: ${VERDE}$pnpm_count${RESET}"
+    echo ""
+
+    if [ "$npm_count" -gt 0 ]; then
+        echo -e "  ${NEGRITA}Migrar proyectos de npm a pnpm?${RESET}"
+        echo -e "  ${GRIS}Esto ejecuta 'pnpm import' en cada proyecto (lee package-lock.json${RESET}"
+        echo -e "  ${GRIS}y genera pnpm-lock.yaml). No modifica package.json.${RESET}"
+        echo ""
+        leer_input "  Migrar los $npm_count proyectos? (s/n): " resp
+
+        if [ "$resp" = "s" ] || [ "$resp" = "S" ]; then
+            local migrados=0
+            local errores=0
+
+            for i in "${!PROYECTOS_DETECTADOS[@]}"; do
+                local p="${PROYECTOS_DETECTADOS[$i]}"
+                local nombre="${PROYECTOS_NOMBRES[$i]}"
+
+                while IFS= read -r lockfile; do
+                    [ -z "$lockfile" ] && continue
+                    local pkg_dir=$(dirname "$lockfile")
+                    local rel="${pkg_dir#$PROYECTOS_DIR/}"
+
+                    echo -e "  ${AZUL}Migrando $rel...${RESET}"
+
+                    # Borrar node_modules viejo para ahorrar espacio
+                    if [ -d "$pkg_dir/node_modules" ]; then
+                        local size=$(get_size_bytes "$pkg_dir/node_modules")
+                        rm -rf "$pkg_dir/node_modules"
+                        echo -e "    ${GRIS}rm node_modules ($(formato_bytes $size))${RESET}"
+                    fi
+
+                    # Importar lockfile y reinstalar con pnpm
+                    if (cd "$pkg_dir" && pnpm import 2>/dev/null && pnpm install --silent 2>&1 | tail -1); then
+                        migrados=$((migrados + 1))
+                        echo -e "    ${VERDE}OK${RESET}"
+                    else
+                        errores=$((errores + 1))
+                        echo -e "    ${ROJO}Error - puedes migrar manualmente: cd \"$pkg_dir\" && pnpm import && pnpm install${RESET}"
+                    fi
+                done < <(find "$p" -maxdepth 3 -name "package-lock.json" ! -path "*/node_modules/*" 2>/dev/null)
+            done
+
+            echo ""
+            echo -e "  ${VERDE}Migrados: $migrados${RESET}  ${ROJO}Errores: $errores${RESET}"
+        fi
+    fi
+}
+
+configurar_cargo_target() {
+    echo ""
+    echo -e "  ${NEGRITA}CONFIGURAR CARGO_TARGET_DIR compartido (Rust/Tauri)${RESET}"
+    echo -e "  ${GRIS}──────────────────────────────────────────────────────────${RESET}"
+    echo ""
+
+    if check_cargo_target_compartido; then
+        echo -e "  ${VERDE}Ya configurado: CARGO_TARGET_DIR=$CARGO_TARGET_DIR${RESET}"
+        if [ -d "$CARGO_TARGET_COMPARTIDO" ]; then
+            local size=$(get_size_bytes "$CARGO_TARGET_COMPARTIDO")
+            echo -e "  ${GRIS}Tamano actual del store compartido: $(formato_bytes $size)${RESET}"
+        fi
+        echo ""
+        return
+    fi
+
+    echo -e "  ${GRIS}En vez de que cada proyecto compile en su propio target/ (~20G cada uno),${RESET}"
+    echo -e "  ${GRIS}todos comparten un directorio. Las deps comunes (tokio, serde, tauri)${RESET}"
+    echo -e "  ${GRIS}se compilan UNA vez. No afecta los repos (target/ ya esta en .gitignore).${RESET}"
+    echo ""
+
+    # Mostrar cuanto ocupan los targets actuales
+    local total_targets=0
+    local count_targets=0
+    detectar_proyectos
+    for i in "${!PROYECTOS_DETECTADOS[@]}"; do
+        local t_bytes=$(espacio_por_tipo "${PROYECTOS_DETECTADOS[$i]}" "target")
+        if [ "$t_bytes" -gt 0 ]; then
+            total_targets=$((total_targets + t_bytes))
+            count_targets=$((count_targets + 1))
+            echo -e "  ${AMARILLO}${PROYECTOS_NOMBRES[$i]}:${RESET} $(formato_bytes $t_bytes)"
+        fi
+    done
+
+    if [ "$count_targets" -eq 0 ]; then
+        echo -e "  ${GRIS}No hay proyectos Rust/Tauri con target/ actualmente${RESET}"
+        echo ""
+        echo -e "  ${GRIS}Configurar de todas formas para futuros builds?${RESET}"
+    else
+        echo ""
+        echo -e "  ${NEGRITA}Total actual: $(formato_bytes $total_targets) en $count_targets proyectos${RESET}"
+        echo -e "  ${GRIS}Estimacion compartido: $(formato_bytes $((total_targets / 3))) - $(formato_bytes $((total_targets / 2)))${RESET}"
+    fi
+
+    echo ""
+    echo -e "  Directorio compartido: ${CYAN}$CARGO_TARGET_COMPARTIDO${RESET}"
+    echo ""
+    leer_input "  Configurar CARGO_TARGET_DIR? (s/n): " resp
+
+    if [ "$resp" != "s" ] && [ "$resp" != "S" ]; then
+        return
+    fi
+
+    # Crear directorio
+    mkdir -p "$CARGO_TARGET_COMPARTIDO"
+
+    # Agregar a shell rc
+    if ! check_cargo_target_en_rc; then
+        echo "" >> "$SHELL_RC"
+        echo "# Cargo target compartido (configurado por gestionar_proyectos.sh)" >> "$SHELL_RC"
+        echo "export CARGO_TARGET_DIR=\"$CARGO_TARGET_COMPARTIDO\"" >> "$SHELL_RC"
+        echo -e "  ${VERDE}Agregado a $SHELL_RC${RESET}"
+    else
+        echo -e "  ${AMARILLO}Ya existe CARGO_TARGET_DIR en $SHELL_RC${RESET}"
+    fi
+
+    # Exportar para la sesion actual
+    export CARGO_TARGET_DIR="$CARGO_TARGET_COMPARTIDO"
+
+    echo ""
+    echo -e "  ${VERDE}CARGO_TARGET_DIR configurado${RESET}"
+
+    # Preguntar si limpiar los targets individuales existentes
+    if [ "$total_targets" -gt 0 ]; then
+        echo ""
+        echo -e "  ${NEGRITA}Limpiar los target/ individuales existentes?${RESET}"
+        echo -e "  ${GRIS}Se regeneraran automaticamente en $CARGO_TARGET_COMPARTIDO al compilar.${RESET}"
+        echo -e "  ${GRIS}Esto liberaria $(formato_bytes $total_targets) ahora mismo.${RESET}"
+        echo ""
+        leer_input "  Limpiar targets individuales? (s/n): " resp2
+
+        if [ "$resp2" = "s" ] || [ "$resp2" = "S" ]; then
+            local total_lib=0
+            for i in "${!PROYECTOS_DETECTADOS[@]}"; do
+                local t_bytes=$(espacio_por_tipo "${PROYECTOS_DETECTADOS[$i]}" "target")
+                if [ "$t_bytes" -gt 0 ]; then
+                    limpiar_proyecto "${PROYECTOS_DETECTADOS[$i]}" "${PROYECTOS_NOMBRES[$i]}" "target"
+                    local lib=$LIMPIAR_RESULTADO
+                    total_lib=$((total_lib + lib))
+                fi
+            done
+            echo ""
+            echo -e "  ${NEGRITA}${VERDE}Liberados: $(formato_bytes $total_lib)${RESET}"
+        fi
+    fi
+
+    echo ""
+    echo -e "  ${AMARILLO}Nota: reinicia tu terminal o ejecuta 'source $SHELL_RC' para aplicar${RESET}"
+}
+
+menu_stores() {
+    detectar_proyectos
+
+    echo ""
+    echo -e "  ${NEGRITA}DETALLE DE STORES COMPARTIDOS${RESET}"
+    echo -e "  ${GRIS}──────────────────────────────────────────────────────────${RESET}"
+    echo ""
+
+    local tiene_algo=false
+
+    # ── pnpm store ──
+    if check_pnpm_instalado; then
+        local store_path=$(pnpm store path 2>/dev/null)
+        if [ -n "$store_path" ] && [ -d "$store_path" ]; then
+            local store_size=$(get_size_bytes "$store_path")
+            tiene_algo=true
+            echo -e "  ${NEGRITA}${CYAN}pnpm store${RESET}"
+            echo -e "  ${GRIS}Ruta:    $store_path${RESET}"
+            echo -e "  ${GRIS}Tamano:  $(formato_bytes $store_size)${RESET}"
+            echo -e "  ${GRIS}Version: $(pnpm --version 2>/dev/null)${RESET}"
+            echo ""
+
+            # Listar proyectos que usan pnpm
+            echo -e "  ${GRIS}Proyectos usando pnpm:${RESET}"
+            local pnpm_count=0
+            for i in "${!PROYECTOS_DETECTADOS[@]}"; do
+                local p="${PROYECTOS_DETECTADOS[$i]}"
+                local nombre="${PROYECTOS_NOMBRES[$i]}"
+                if find "$p" -maxdepth 3 -name "pnpm-lock.yaml" ! -path "*/node_modules/*" 2>/dev/null | grep -q .; then
+                    local node_bytes=$(espacio_por_tipo "$p" "node")
+                    local node_txt="-"
+                    [ "$node_bytes" -gt 0 ] && node_txt="$(formato_bytes $node_bytes)"
+                    printf "    ${VERDE}%-24s${RESET} ${GRIS}node_modules: %s${RESET}\n" "$nombre" "$node_txt"
+                    pnpm_count=$((pnpm_count + 1))
+                fi
+            done
+            [ "$pnpm_count" -eq 0 ] && echo -e "    ${GRIS}(ninguno)${RESET}"
+
+            # Proyectos con npm que podrian migrar
+            local npm_count=0
+            for i in "${!PROYECTOS_DETECTADOS[@]}"; do
+                local p="${PROYECTOS_DETECTADOS[$i]}"
+                if find "$p" -maxdepth 3 -name "package-lock.json" ! -path "*/node_modules/*" 2>/dev/null | grep -q .; then
+                    if ! find "$p" -maxdepth 3 -name "pnpm-lock.yaml" ! -path "*/node_modules/*" 2>/dev/null | grep -q .; then
+                        npm_count=$((npm_count + 1))
+                    fi
+                fi
+            done
+            [ "$npm_count" -gt 0 ] && echo -e "  ${AMARILLO}  $npm_count proyecto(s) aun usan npm (migrar desde menu Configuracion)${RESET}"
+            echo ""
+        fi
+    else
+        echo -e "  ${GRIS}pnpm: no instalado${RESET}"
+        echo ""
+    fi
+
+    # ── Cargo target compartido ──
+    local cargo_dir=""
+    if [ -n "$CARGO_TARGET_DIR" ] && [ -d "$CARGO_TARGET_DIR" ]; then
+        cargo_dir="$CARGO_TARGET_DIR"
+    elif [ -d "$CARGO_TARGET_COMPARTIDO" ]; then
+        cargo_dir="$CARGO_TARGET_COMPARTIDO"
+    fi
+
+    if [ -n "$cargo_dir" ]; then
+        local cargo_size=$(get_size_bytes "$cargo_dir")
+        tiene_algo=true
+        echo -e "  ${NEGRITA}${CYAN}Cargo target compartido${RESET}"
+        echo -e "  ${GRIS}Ruta:    $cargo_dir${RESET}"
+        echo -e "  ${GRIS}Tamano:  $(formato_bytes $cargo_size)${RESET}"
+        if [ -n "$CARGO_TARGET_DIR" ]; then
+            echo -e "  ${VERDE}CARGO_TARGET_DIR activo en esta sesion${RESET}"
+        else
+            echo -e "  ${AMARILLO}CARGO_TARGET_DIR no activo (ejecuta: source $SHELL_RC)${RESET}"
+        fi
+        echo ""
+
+        # Desglose por subcarpetas (debug, release, etc)
+        echo -e "  ${GRIS}Desglose:${RESET}"
+        while IFS= read -r subdir; do
+            [ -z "$subdir" ] && continue
+            local sub_name=$(basename "$subdir")
+            local sub_size=$(get_size_bytes "$subdir")
+            [ "$sub_size" -gt 0 ] && printf "    ${GRIS}%-20s %s${RESET}\n" "$sub_name/" "$(formato_bytes $sub_size)"
+        done < <(find "$cargo_dir" -maxdepth 1 -mindepth 1 -type d 2>/dev/null | sort)
+        echo ""
+
+        # Proyectos Rust
+        echo -e "  ${GRIS}Proyectos Rust/Tauri:${RESET}"
+        local rust_count=0
+        for i in "${!PROYECTOS_DETECTADOS[@]}"; do
+            local p="${PROYECTOS_DETECTADOS[$i]}"
+            local nombre="${PROYECTOS_NOMBRES[$i]}"
+            if find "$p" -maxdepth 3 -name "Cargo.toml" ! -path "*/target/*" 2>/dev/null | grep -q .; then
+                local ind_target=$(espacio_por_tipo "$p" "target")
+                local ind_txt="-"
+                [ "$ind_target" -gt 0 ] && ind_txt="$(formato_bytes $ind_target) (individual)"
+                printf "    ${VERDE}%-24s${RESET} ${GRIS}target: %s${RESET}\n" "$nombre" "$ind_txt"
+                rust_count=$((rust_count + 1))
+            fi
+        done
+        [ "$rust_count" -eq 0 ] && echo -e "    ${GRIS}(ninguno)${RESET}"
+        echo ""
+    else
+        echo -e "  ${GRIS}Cargo target compartido: no configurado${RESET}"
+        echo ""
+    fi
+
+    if ! $tiene_algo; then
+        echo -e "  ${AMARILLO}No hay stores compartidos configurados${RESET}"
+        echo -e "  ${GRIS}Configuralos desde el menu principal con la opcion 'c'${RESET}"
+        echo ""
+    fi
+
+    # Opciones
+    echo -e "  ${NEGRITA}Opciones:${RESET}"
+    if check_pnpm_instalado; then
+        echo -e "  ${CYAN}1)${RESET} Limpiar pnpm store (paquetes huerfanos)"
+    fi
+    if [ -n "$cargo_dir" ]; then
+        echo -e "  ${CYAN}2)${RESET} Limpiar cargo target compartido"
+    fi
+    echo -e "  ${CYAN}v)${RESET} Volver"
+    echo ""
+    leer_input "  > " resp_store
+
+    case "$resp_store" in
+        1)
+            if check_pnpm_instalado; then
+                echo ""
+                echo -e "  ${AZUL}Limpiando paquetes huerfanos del pnpm store...${RESET}"
+                local antes=$(get_size_bytes "$(pnpm store path 2>/dev/null)")
+                pnpm store prune 2>&1 | tail -3
+                local despues=$(get_size_bytes "$(pnpm store path 2>/dev/null)")
+                local diff=$((antes - despues))
+                if [ "$diff" -gt 0 ]; then
+                    echo -e "  ${VERDE}Liberados: $(formato_bytes $diff)${RESET}"
+                else
+                    echo -e "  ${GRIS}No habia paquetes huerfanos${RESET}"
+                fi
+            fi
+            ;;
+        2)
+            if [ -n "$cargo_dir" ]; then
+                echo ""
+                local cargo_size=$(get_size_bytes "$cargo_dir")
+                echo -e "  ${AMARILLO}El cargo target compartido ocupa $(formato_bytes $cargo_size)${RESET}"
+                echo -e "  ${GRIS}Se regenerara al compilar cualquier proyecto Rust.${RESET}"
+                leer_input "  Limpiar? (escribe SI para confirmar): " resp_cargo
+                if [ "$resp_cargo" = "SI" ]; then
+                    echo -e "  ${AZUL}Limpiando $cargo_dir...${RESET}"
+                    rm -rf "$cargo_dir"/*
+                    echo -e "  ${VERDE}Liberados: $(formato_bytes $cargo_size)${RESET}"
+                else
+                    echo -e "  ${GRIS}Cancelado${RESET}"
+                fi
+            fi
+            ;;
+    esac
+}
+
+mostrar_config() {
+    echo ""
+    echo -e "  ${NEGRITA}ESTADO DE CONFIGURACION${RESET}"
+    echo -e "  ${GRIS}──────────────────────────────────────────────────────────${RESET}"
+    echo ""
+
+    # pnpm
+    if check_pnpm_instalado; then
+        echo -e "  ${VERDE}pnpm:              instalado (v$(pnpm --version 2>/dev/null))${RESET}"
+        local store_path=$(pnpm store path 2>/dev/null)
+        if [ -n "$store_path" ] && [ -d "$store_path" ]; then
+            local store_size=$(get_size_bytes "$store_path")
+            echo -e "  ${GRIS}  store:           $store_path ($(formato_bytes $store_size))${RESET}"
+        fi
+    else
+        echo -e "  ${ROJO}pnpm:              no instalado${RESET}"
+    fi
+
+    # Contar gestores
+    local counts=$(contar_gestores_node)
+    local npm_count=$(echo "$counts" | cut -d' ' -f1)
+    local pnpm_count=$(echo "$counts" | cut -d' ' -f2)
+    echo -e "  ${GRIS}  proyectos npm:   $npm_count${RESET}"
+    echo -e "  ${GRIS}  proyectos pnpm:  $pnpm_count${RESET}"
+    echo ""
+
+    # CARGO_TARGET_DIR
+    if check_cargo_target_compartido; then
+        echo -e "  ${VERDE}CARGO_TARGET_DIR:  $CARGO_TARGET_DIR${RESET}"
+        if [ -d "$CARGO_TARGET_COMPARTIDO" ]; then
+            local ct_size=$(get_size_bytes "$CARGO_TARGET_COMPARTIDO")
+            echo -e "  ${GRIS}  tamano store:    $(formato_bytes $ct_size)${RESET}"
+        fi
+    elif check_cargo_target_en_rc; then
+        echo -e "  ${AMARILLO}CARGO_TARGET_DIR:  configurado en $SHELL_RC pero no activo en esta sesion${RESET}"
+        echo -e "  ${GRIS}  ejecuta: source $SHELL_RC${RESET}"
+    else
+        echo -e "  ${ROJO}CARGO_TARGET_DIR:  no configurado (cada proyecto compila en su propio target/)${RESET}"
+    fi
+
+    # Targets individuales
+    local total_targets=0
+    local count_targets=0
+    for i in "${!PROYECTOS_DETECTADOS[@]}"; do
+        local t_bytes=$(espacio_por_tipo "${PROYECTOS_DETECTADOS[$i]}" "target")
+        if [ "$t_bytes" -gt 0 ]; then
+            total_targets=$((total_targets + t_bytes))
+            count_targets=$((count_targets + 1))
+        fi
+    done
+    if [ "$count_targets" -gt 0 ]; then
+        echo -e "  ${GRIS}  targets indiv.:  $count_targets proyectos ($(formato_bytes $total_targets))${RESET}"
+    fi
+
+    echo ""
+}
+
+menu_configuracion() {
+    detectar_proyectos
+    mostrar_config
+
+    echo -e "  ${NEGRITA}OPCIONES:${RESET}"
+    echo -e "  ${CYAN}1)${RESET} Configurar pnpm (Node - store compartido)"
+    echo -e "  ${CYAN}2)${RESET} Configurar CARGO_TARGET_DIR (Rust/Tauri - compilacion compartida)"
+    echo -e "  ${CYAN}3)${RESET} Configurar ambos"
+    echo -e "  ${CYAN}v)${RESET} Volver al menu principal"
+    echo ""
+    leer_input "  Elige una opcion: " opcion
+
+    case "$opcion" in
+        1) configurar_pnpm ;;
+        2) configurar_cargo_target ;;
+        3) configurar_pnpm; configurar_cargo_target ;;
+        v|*) return ;;
+    esac
+
+    echo ""
+    leer_input "  Presiona Enter para continuar..." _dummy
+}
+
+# ============================================================================
+# AUTO-COMMIT CON IA (Claude / Gemini)
+# ============================================================================
+
+AI_PREFERIDA=""  # claude, gemini — se elige en el menu
+
+detectar_ias_disponibles() {
+    local disponibles=""
+    command -v claude &>/dev/null && disponibles="${disponibles}claude "
+    command -v gemini &>/dev/null && disponibles="${disponibles}gemini "
+    command -v qwen &>/dev/null && disponibles="${disponibles}qwen "
+    echo "$disponibles"
+}
+
+# Genera mensaje de commit usando IA
+generar_mensaje_commit() {
+    local proyecto_path="$1"
+    local ai="$2"
+
+    # Obtener diff y status
+    local status=$(cd "$proyecto_path" && git status --porcelain 2>/dev/null)
+    local diff=$(cd "$proyecto_path" && git diff 2>/dev/null | head -300)
+    local diff_staged=$(cd "$proyecto_path" && git diff --cached 2>/dev/null | head -300)
+    local untracked=$(cd "$proyecto_path" && git ls-files --others --exclude-standard 2>/dev/null | head -20)
+
+    # Construir contexto
+    local contexto="Genera un mensaje de commit conciso en español para estos cambios.
+Usa conventional commits (feat:, fix:, refactor:, docs:, chore:, etc).
+Primera linea: maximo 72 caracteres, en español.
+Si hay mas detalle, agrega cuerpo separado por linea vacia.
+Responde SOLO con el mensaje de commit, nada mas.
+
+git status:
+$status
+"
+    [ -n "$diff" ] && contexto="${contexto}
+git diff (archivos modificados):
+$diff
+"
+    [ -n "$diff_staged" ] && contexto="${contexto}
+git diff --cached (staged):
+$diff_staged
+"
+    [ -n "$untracked" ] && contexto="${contexto}
+Archivos nuevos sin trackear:
+$untracked
+"
+
+    # Guardar contexto en archivo temporal (evita problemas con prompts largos)
+    local tmp_prompt=$(mktemp /tmp/commit_prompt_XXXXXX.txt)
+    echo "$contexto" > "$tmp_prompt"
+
+    # Llamar a la IA
+    local mensaje=""
+    case "$ai" in
+        claude)
+            mensaje=$(cat "$tmp_prompt" | claude -p --model claude-sonnet-4-20250514 2>/dev/null)
+            ;;
+        gemini)
+            mensaje=$(gemini -p "$(cat "$tmp_prompt")" 2>/dev/null)
+            ;;
+        qwen)
+            mensaje=$(cat "$tmp_prompt" | qwen -p "" 2>/dev/null)
+            ;;
+    esac
+
+    rm -f "$tmp_prompt"
+
+    # Limpiar posibles backticks, formato markdown, o lineas vacias extra
+    mensaje=$(echo "$mensaje" | sed '/^```/d' | sed '/^[[:space:]]*$/d')
+
+    echo "$mensaje"
+}
+
+# Commit de un proyecto individual
+auto_commit_proyecto() {
+    local proyecto_path="$1"
+    local nombre="$2"
+    local ai="$3"
+
+    echo ""
+    echo -e "  ${NEGRITA}── $nombre ──${RESET}"
+
+    # Verificar que tiene git
+    if [ ! -d "$proyecto_path/.git" ]; then
+        echo -e "  ${ROJO}Sin git, no se puede commitear${RESET}"
+        return 1
+    fi
+
+    # Verificar que tiene cambios
+    local cambios=$(cd "$proyecto_path" && git status --porcelain 2>/dev/null | wc -l)
+    if [ "$cambios" -eq 0 ]; then
+        echo -e "  ${GRIS}Sin cambios${RESET}"
+        return 0
+    fi
+
+    # Mostrar resumen de cambios
+    echo -e "  ${GRIS}$cambios archivo(s) modificado(s):${RESET}"
+    (cd "$proyecto_path" && git status --porcelain 2>/dev/null | head -10 | while read linea; do
+        echo -e "    ${GRIS}$linea${RESET}"
+    done)
+    [ "$cambios" -gt 10 ] && echo -e "    ${GRIS}... y $((cambios - 10)) mas${RESET}"
+
+    # Generar mensaje con IA
+    echo ""
+    echo -e "  ${AZUL}Generando mensaje con $ai...${RESET}"
+    local mensaje=$(generar_mensaje_commit "$proyecto_path" "$ai")
+
+    if [ -z "$mensaje" ]; then
+        echo -e "  ${ROJO}Error: la IA no genero mensaje${RESET}"
+        return 1
+    fi
+
+    # Mostrar mensaje propuesto
+    echo ""
+    echo -e "  ${NEGRITA}Mensaje propuesto:${RESET}"
+    echo -e "  ${CYAN}────────────────────────────────────────${RESET}"
+    echo "$mensaje" | while read linea; do
+        echo -e "  ${VERDE}$linea${RESET}"
+    done
+    echo -e "  ${CYAN}────────────────────────────────────────${RESET}"
+    echo ""
+
+    # Pedir confirmacion
+    echo -e "  ${NEGRITA}Opciones:${RESET}"
+    echo -e "  ${CYAN}s)${RESET} Aceptar y commitear"
+    echo -e "  ${CYAN}e)${RESET} Editar mensaje manualmente"
+    echo -e "  ${CYAN}r)${RESET} Regenerar con IA"
+    echo -e "  ${CYAN}n)${RESET} Saltar este proyecto"
+    leer_input "  > " resp
+
+    case "$resp" in
+        s|S)
+            ;;
+        e|E)
+            echo -e "  ${GRIS}Escribe tu mensaje (Enter para terminar):${RESET}"
+            leer_input "  > " mensaje_manual
+            if [ -n "$mensaje_manual" ]; then
+                mensaje="$mensaje_manual"
+            fi
+            ;;
+        r|R)
+            echo -e "  ${AZUL}Regenerando...${RESET}"
+            mensaje=$(generar_mensaje_commit "$proyecto_path" "$ai")
+            if [ -z "$mensaje" ]; then
+                echo -e "  ${ROJO}Error al regenerar${RESET}"
+                return 1
+            fi
+            echo "$mensaje" | while read linea; do
+                echo -e "  ${VERDE}$linea${RESET}"
+            done
+            leer_input "  Aceptar? (s/n): " resp2
+            if [ "$resp2" != "s" ] && [ "$resp2" != "S" ]; then
+                echo -e "  ${GRIS}Saltando $nombre${RESET}"
+                return 0
+            fi
+            ;;
+        *)
+            echo -e "  ${GRIS}Saltando $nombre${RESET}"
+            return 0
+            ;;
+    esac
+
+    # Hacer el commit
+    echo -e "  ${AZUL}Commiteando...${RESET}"
+    (cd "$proyecto_path" && git add -A && git commit -m "$(cat <<EOF
+$mensaje
+EOF
+)" 2>&1) | while read linea; do
+        echo -e "    ${GRIS}$linea${RESET}"
+    done
+
+    if [ ${PIPESTATUS[0]} -eq 0 ]; then
+        echo -e "  ${VERDE}Commit exitoso${RESET}"
+        return 0
+    else
+        echo -e "  ${ROJO}Error en el commit${RESET}"
+        return 1
+    fi
+}
+
+# Menu de auto-commit
+menu_auto_commit() {
+    detectar_proyectos
+
+    echo ""
+    echo -e "  ${NEGRITA}AUTO-COMMIT CON IA${RESET}"
+    echo -e "  ${GRIS}──────────────────────────────────────────────────────────${RESET}"
+    echo ""
+
+    # Verificar IAs disponibles
+    local ias=$(detectar_ias_disponibles)
+    if [ -z "$ias" ]; then
+        echo -e "  ${ROJO}No se encontro ninguna IA CLI (claude, gemini)${RESET}"
+        echo -e "  ${GRIS}Instala claude o gemini CLI para usar esta funcion${RESET}"
+        return
+    fi
+
+    echo -e "  IAs disponibles: ${VERDE}$ias${RESET}"
+    echo ""
+
+    # Elegir IA
+    local ias_array=($ias)
+    local ai_elegida=""
+    if [ ${#ias_array[@]} -eq 1 ]; then
+        ai_elegida="${ias_array[0]}"
+    else
+        leer_input "  Usar cual? (${ias// //}): " ai_elegida
+        # Validar que la eleccion es valida
+        local valida=false
+        for ia in "${ias_array[@]}"; do
+            [ "$ai_elegida" = "$ia" ] && valida=true
+        done
+        $valida || ai_elegida="${ias_array[0]}"
+    fi
+    echo -e "  Usando: ${CYAN}$ai_elegida${RESET}"
+
+    # Listar proyectos con cambios pendientes
+    echo ""
+    echo -e "  ${NEGRITA}Proyectos con cambios sin commitear:${RESET}"
+    echo ""
+
+    local proyectos_con_cambios=()
+    local indices_con_cambios=()
+
+    for i in "${!PROYECTOS_DETECTADOS[@]}"; do
+        local p="${PROYECTOS_DETECTADOS[$i]}"
+        local nombre="${PROYECTOS_NOMBRES[$i]}"
+
+        if [ -d "$p/.git" ]; then
+            local cambios=$(cd "$p" && git status --porcelain 2>/dev/null | wc -l)
+            if [ "$cambios" -gt 0 ]; then
+                local branch=$(cd "$p" && git branch --show-current 2>/dev/null)
+                local num=$((${#proyectos_con_cambios[@]} + 1))
+                printf "  ${AMARILLO}%-4s %-24s %s cambio(s)  ${GRIS}[%s]${RESET}\n" "$num)" "$nombre" "$cambios" "$branch"
+                proyectos_con_cambios+=("$p")
+                indices_con_cambios+=("$i")
+            fi
+        fi
+    done
+
+    if [ ${#proyectos_con_cambios[@]} -eq 0 ]; then
+        echo -e "  ${VERDE}Todos los proyectos con git estan limpios${RESET}"
+        return
+    fi
+
+    echo ""
+    echo -e "  ${NEGRITA}Opciones:${RESET}"
+    echo -e "  ${CYAN}Numeros${RESET} (ej: 1 3 5) para elegir proyectos"
+    echo -e "  ${CYAN}todos${RESET} para commitear todos"
+    echo -e "  ${CYAN}v${RESET} para volver"
+    echo ""
+    leer_input "  > " seleccion
+
+    [ "$seleccion" = "v" ] && return
+
+    local indices_seleccionados=()
+    if [ "$seleccion" = "todos" ]; then
+        for i in $(seq 0 $((${#proyectos_con_cambios[@]} - 1))); do
+            indices_seleccionados+=("$i")
+        done
+    else
+        for num in $seleccion; do
+            if [ "$num" -ge 1 ] && [ "$num" -le "${#proyectos_con_cambios[@]}" ] 2>/dev/null; then
+                indices_seleccionados+=("$((num - 1))")
+            fi
+        done
+    fi
+
+    # Procesar cada proyecto seleccionado
+    local commits_ok=0
+    local commits_fail=0
+    for idx in "${indices_seleccionados[@]}"; do
+        local p="${proyectos_con_cambios[$idx]}"
+        local orig_idx="${indices_con_cambios[$idx]}"
+        local nombre="${PROYECTOS_NOMBRES[$orig_idx]}"
+
+        if auto_commit_proyecto "$p" "$nombre" "$ai_elegida"; then
+            commits_ok=$((commits_ok + 1))
+        else
+            commits_fail=$((commits_fail + 1))
+        fi
+    done
+
+    echo ""
+    echo -e "  ${NEGRITA}Resultado: ${VERDE}$commits_ok commits OK${RESET}  ${ROJO}$commits_fail errores${RESET}"
+
+    # Preguntar si hacer push
+    if [ "$commits_ok" -gt 0 ]; then
+        echo ""
+        echo -e "  ${NEGRITA}Hacer push de los proyectos commiteados?${RESET}"
+        echo -e "  ${CYAN}s)${RESET} Push todos"
+        echo -e "  ${CYAN}n)${RESET} No hacer push"
+        leer_input "  > " push_resp
+
+        if [ "$push_resp" = "s" ] || [ "$push_resp" = "S" ]; then
+            for idx in "${indices_seleccionados[@]}"; do
+                local p="${proyectos_con_cambios[$idx]}"
+                local orig_idx="${indices_con_cambios[$idx]}"
+                local nombre="${PROYECTOS_NOMBRES[$orig_idx]}"
+
+                # Verificar que tiene remote
+                if (cd "$p" && git remote 2>/dev/null | grep -q .); then
+                    local branch=$(cd "$p" && git branch --show-current 2>/dev/null)
+                    echo -e "  ${AZUL}Push $nombre [$branch]...${RESET}"
+                    local push_output=$(cd "$p" && git push origin "$branch" 2>&1)
+                    local push_exit=$?
+                    if [ $push_exit -eq 0 ]; then
+                        echo -e "  ${VERDE}$nombre: push OK${RESET}"
+                    else
+                        echo -e "  ${ROJO}$nombre: error en push${RESET}"
+                        echo -e "    ${GRIS}$push_output${RESET}"
+                    fi
+                else
+                    echo -e "  ${AMARILLO}$nombre: sin remote configurado, saltando push${RESET}"
+                fi
+            done
+        fi
+    fi
+}
+
+# ============================================================================
+# MENU PRINCIPAL
+# ============================================================================
+
+menu_principal() {
+    while true; do
+        mostrar_estado
+
+        echo -e "${NEGRITA}  ACCIONES:${RESET}"
+        echo -e "  ${CYAN}a)${RESET} Activar proyecto (instalar dependencias)"
+        echo -e "  ${CYAN}d)${RESET} Desactivar proyecto (limpiar dependencias)"
+        echo -e "  ${CYAN}l)${RESET} Limpiar TODOS excepto los que elijas"
+        echo -e "  ${CYAN}n)${RESET} Limpiar solo node_modules de todos"
+        echo -e "  ${CYAN}t)${RESET} Limpiar solo target/ de todos (Rust/Tauri)"
+        echo -e "  ${CYAN}g)${RESET} Ver detalle estado GIT de todos"
+        echo -e "  ${CYAN}i)${RESET} Inicializar git + GitHub en proyectos sin repo"
+        echo -e "  ${CYAN}m)${RESET} Auto-commit con IA (Claude/Gemini/Qwen)"
+        echo -e "  ${CYAN}s)${RESET} Stores compartidos (pnpm, cargo target)"
+        echo -e "  ${CYAN}c)${RESET} Configurar optimizaciones (pnpm, cargo compartido)"
+        echo -e "  ${CYAN}q)${RESET} Salir"
+        echo ""
+        leer_input "  Elige una opcion: " opcion
+
+        case "$opcion" in
+            a)
+                echo ""
+                echo -e "  ${NEGRITA}TODOS LOS PROYECTOS:${RESET}"
+                echo ""
+                for i in "${!PROYECTOS_DETECTADOS[@]}"; do
+                    local nombre="${PROYECTOS_NOMBRES[$i]}"
+                    local num=$((i + 1))
+                    local nombre_display="$nombre"
+                    [ ${#nombre_display} -gt 23 ] && nombre_display="${nombre_display:0:20}..."
+                    local node_bytes=$(espacio_por_tipo "${PROYECTOS_DETECTADOS[$i]}" "node")
+                    local target_bytes=$(espacio_por_tipo "${PROYECTOS_DETECTADOS[$i]}" "target")
+                    local total_bytes=$((node_bytes + target_bytes))
+                    if [ "$total_bytes" -gt 0 ]; then
+                        printf "  ${VERDE}%-4s %-24s (activo - %s)${RESET}\n" "$num)" "$nombre_display" "$(formato_bytes $total_bytes)"
+                    else
+                        printf "  ${GRIS}%-4s %-24s (sin dependencias)${RESET}\n" "$num)" "$nombre_display"
+                    fi
+                done
+                echo ""
+                leer_input "  Numero(s) de proyecto a ACTIVAR (ej: 1 3 5): " nums
+                local activados=()
+                for num in $nums; do
+                    if [ "$num" -ge 1 ] && [ "$num" -le "${#PROYECTOS_DETECTADOS[@]}" ] 2>/dev/null; then
+                        local idx=$((num - 1))
+                        instalar_proyecto "${PROYECTOS_DETECTADOS[$idx]}" "${PROYECTOS_NOMBRES[$idx]}"
+                        activados+=("$idx")
+                    fi
+                done
+                # Ofrecer lanzar si se activo un solo proyecto
+                if [ ${#activados[@]} -eq 1 ]; then
+                    ofrecer_lanzar_proyecto "${PROYECTOS_DETECTADOS[${activados[0]}]}" "${PROYECTOS_NOMBRES[${activados[0]}]}"
+                elif [ ${#activados[@]} -gt 1 ]; then
+                    echo ""
+                    echo -e "  ${NEGRITA}Lanzar alguno de los proyectos activados?${RESET}"
+                    for i in "${!activados[@]}"; do
+                        local a_idx="${activados[$i]}"
+                        local num=$((i + 1))
+                        printf "  ${CYAN}%s)${RESET} %s\n" "$num" "${PROYECTOS_NOMBRES[$a_idx]}"
+                    done
+                    echo -e "  ${CYAN}n)${RESET} No lanzar"
+                    echo ""
+                    leer_input "  > " resp_cual
+                    if [ "$resp_cual" != "n" ] && [ -n "$resp_cual" ]; then
+                        if [ "$resp_cual" -ge 1 ] && [ "$resp_cual" -le "${#activados[@]}" ] 2>/dev/null; then
+                            local a_idx="${activados[$((resp_cual - 1))]}"
+                            ofrecer_lanzar_proyecto "${PROYECTOS_DETECTADOS[$a_idx]}" "${PROYECTOS_NOMBRES[$a_idx]}"
+                        fi
+                    fi
+                fi
+                leer_input "  Presiona Enter para continuar..." _dummy
+                ;;
+            d)
+                echo ""
+                leer_input "  Numero(s) de proyecto a DESACTIVAR (ej: 1 3 5): " nums
+                local total_lib=0
+                for num in $nums; do
+                    if [ "$num" -ge 1 ] && [ "$num" -le "${#PROYECTOS_DETECTADOS[@]}" ] 2>/dev/null; then
+                        local idx=$((num - 1))
+                        limpiar_proyecto "${PROYECTOS_DETECTADOS[$idx]}" "${PROYECTOS_NOMBRES[$idx]}"
+                        local lib=$LIMPIAR_RESULTADO
+                        total_lib=$((total_lib + lib))
+                    fi
+                done
+                echo ""
+                echo -e "  ${NEGRITA}${VERDE}Total liberado: $(formato_bytes $total_lib)${RESET}"
+                leer_input "  Presiona Enter para continuar..." _dummy
+                ;;
+            l)
+                echo ""
+                leer_input "  Numero(s) de proyecto a MANTENER (ej: 1 3): " mantener
+                echo ""
+                local total_lib=0
+                for i in "${!PROYECTOS_DETECTADOS[@]}"; do
+                    local num=$((i + 1))
+                    local skip=false
+                    for m in $mantener; do
+                        [ "$num" = "$m" ] && skip=true
+                    done
+
+                    if ! $skip; then
+                        if tiene_deps "${PROYECTOS_DETECTADOS[$i]}"; then
+                            limpiar_proyecto "${PROYECTOS_DETECTADOS[$i]}" "${PROYECTOS_NOMBRES[$i]}"
+                            local lib=$LIMPIAR_RESULTADO
+                            total_lib=$((total_lib + lib))
+                        fi
+                    fi
+                done
+                echo ""
+                echo -e "  ${NEGRITA}${VERDE}Total liberado: $(formato_bytes $total_lib)${RESET}"
+                leer_input "  Presiona Enter para continuar..." _dummy
+                ;;
+            n)
+                echo ""
+                echo -e "  ${AMARILLO}Limpiando TODOS los node_modules (con verificacion git)...${RESET}"
+                local total_lib=0
+                for i in "${!PROYECTOS_DETECTADOS[@]}"; do
+                    local node_bytes=$(espacio_por_tipo "${PROYECTOS_DETECTADOS[$i]}" "node")
+                    if [ "$node_bytes" -gt 0 ]; then
+                        limpiar_proyecto "${PROYECTOS_DETECTADOS[$i]}" "${PROYECTOS_NOMBRES[$i]}" "node"
+                        local lib=$LIMPIAR_RESULTADO
+                        total_lib=$((total_lib + lib))
+                    fi
+                done
+                echo -e "  ${NEGRITA}${VERDE}Total liberado: $(formato_bytes $total_lib)${RESET}"
+                leer_input "  Presiona Enter para continuar..." _dummy
+                ;;
+            t)
+                echo ""
+                echo -e "  ${AMARILLO}Limpiando TODOS los target/ (con verificacion git)...${RESET}"
+                local total_lib=0
+                for i in "${!PROYECTOS_DETECTADOS[@]}"; do
+                    local target_bytes=$(espacio_por_tipo "${PROYECTOS_DETECTADOS[$i]}" "target")
+                    if [ "$target_bytes" -gt 0 ]; then
+                        limpiar_proyecto "${PROYECTOS_DETECTADOS[$i]}" "${PROYECTOS_NOMBRES[$i]}" "target"
+                    local lib=$LIMPIAR_RESULTADO
+                        total_lib=$((total_lib + lib))
+                    fi
+                done
+                echo -e "  ${NEGRITA}${VERDE}Total liberado: $(formato_bytes $total_lib)${RESET}"
+                leer_input "  Presiona Enter para continuar..." _dummy
+                ;;
+            g)
+                mostrar_git_detalle
+                leer_input "  Presiona Enter para continuar..." _dummy
+                ;;
+            i)
+                menu_inicializar_git
+                leer_input "  Presiona Enter para continuar..." _dummy
+                ;;
+            m)
+                menu_auto_commit
+                leer_input "  Presiona Enter para continuar..." _dummy
+                ;;
+            s)
+                menu_stores
+                leer_input "  Presiona Enter para continuar..." _dummy
+                ;;
+            c)
+                menu_configuracion
+                ;;
+            q)
+                echo -e "\n  ${VERDE}Hasta luego!${RESET}\n"
+                exit 0
+                ;;
+            *)
+                echo -e "  ${ROJO}Opcion no valida${RESET}"
+                sleep 1
+                ;;
+        esac
+    done
+}
+
+# ============================================================================
+# MODO LINEA DE COMANDOS
+# ============================================================================
+
+if [ "$1" = "--limpiar-todo" ]; then
+    detectar_proyectos
+    echo -e "${AMARILLO}Limpiando TODAS las dependencias (con verificacion git)...${RESET}"
+    for i in "${!PROYECTOS_DETECTADOS[@]}"; do
+        if tiene_deps "${PROYECTOS_DETECTADOS[$i]}"; then
+            limpiar_proyecto "${PROYECTOS_DETECTADOS[$i]}" "${PROYECTOS_NOMBRES[$i]}"
+        fi
+    done
+    echo ""
+    leer_input "  Presiona Enter para ir al menu principal..." _dummy
+elif [ "$1" = "--limpiar-targets" ]; then
+    detectar_proyectos
+    echo -e "${AMARILLO}Limpiando todos los target/ de Rust/Tauri (con verificacion git)...${RESET}"
+    for i in "${!PROYECTOS_DETECTADOS[@]}"; do
+        target_bytes=$(espacio_por_tipo "${PROYECTOS_DETECTADOS[$i]}" "target")
+        if [ "$target_bytes" -gt 0 ]; then
+            limpiar_proyecto "${PROYECTOS_DETECTADOS[$i]}" "${PROYECTOS_NOMBRES[$i]}" "target"
+        fi
+    done
+    echo ""
+    leer_input "  Presiona Enter para ir al menu principal..." _dummy
+elif [ "$1" = "--estado" ]; then
+    mostrar_estado
+    leer_input "  Presiona Enter para ir al menu principal..." _dummy
+elif [ "$1" = "--git-status" ]; then
+    mostrar_git_detalle
+    leer_input "  Presiona Enter para ir al menu principal..." _dummy
+elif [ "$1" = "--config" ]; then
+    detectar_proyectos
+    menu_configuracion
+elif [ "$1" = "--help" ] || [ "$1" = "-h" ]; then
+    echo ""
+    echo -e "${NEGRITA}  gestionar_proyectos.sh${RESET} - Gestor de dependencias"
+    echo ""
+    echo "  Uso: ./gestionar_proyectos.sh [opcion]"
+    echo ""
+    echo "  Sin argumentos    Menu interactivo"
+    echo "  --estado          Mostrar tabla de estado"
+    echo "  --git-status      Detalle git de todos los proyectos"
+    echo "  --limpiar-todo    Limpiar dependencias de todos (con verificacion)"
+    echo "  --limpiar-targets Limpiar solo target/ de Rust/Tauri"
+    echo "  --config          Configurar optimizaciones (pnpm, cargo compartido)"
+    echo "  --help, -h        Mostrar esta ayuda"
+    echo ""
+    leer_input "  Presiona Enter para ir al menu principal..." _dummy
+fi
+
+menu_principal

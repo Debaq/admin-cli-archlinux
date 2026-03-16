@@ -2,13 +2,12 @@
   <img src="https://img.shields.io/badge/Arch_Linux-1793D1?style=for-the-badge&logo=arch-linux&logoColor=white" alt="Arch Linux"/>
   <img src="https://img.shields.io/badge/EndeavourOS-7B42BC?style=for-the-badge&logo=endeavouros&logoColor=white" alt="EndeavourOS"/>
   <img src="https://img.shields.io/badge/Shell-Bash-4EAA25?style=for-the-badge&logo=gnu-bash&logoColor=white" alt="Bash"/>
-  <img src="https://img.shields.io/badge/License-MIT-blue?style=for-the-badge" alt="License"/>
 </p>
 
 <h1 align="center">ADMIN-CLI</h1>
 <p align="center"><b>Centro de comando para Arch Linux desde tu terminal.</b></p>
 <p align="center">
-Suite modular de herramientas CLI para administrar hardware, redes, Docker, proyectos Git, impresoras y mantenimiento del sistema — todo sin salir de la terminal.
+Suite modular de herramientas CLI para administrar redes, hardware, Docker, proyectos, impresoras y mantenimiento del sistema.
 </p>
 
 ---
@@ -16,6 +15,16 @@ Suite modular de herramientas CLI para administrar hardware, redes, Docker, proy
 ## Vista previa
 
 ```
+══════════════════════════════════════════════════════
+         PANEL DE CONTROL: CPU & SISTEMA
+══════════════════════════════════════════════════════
+Modelo:      AMD Ryzen 7 PRO 7840U
+Nucleos:     16 Hilos
+Energia:     ⚡ CONECTADO  |  Gob: performance
+Temp:        +52.4°C   |  RAM: 8.2Gi / 30Gi
+IP Local:    192.168.1.50 (wlp1s0)
+IP Publica:  xxx.xxx.xxx.xxx
+--------------------------------------------------
 ╔══════════════════════════════════════════════════════╗
 ║                CENTRO DE COMANDO                     ║
 ╚══════════════════════════════════════════════════════╝
@@ -23,7 +32,7 @@ Suite modular de herramientas CLI para administrar hardware, redes, Docker, proy
   [2] PROCESOS            (Top CPU/RAM, Kill, Buscar)
   [3] HARDWARE            (Discos, USB, Sensores)
   [4] DOCKER MANAGER      (Contenedores, Logs, Shell)
-  [5] GIT PROJECTS        (Estado Repos, Pull Masivo)
+  [5] PROYECTOS           (Repos Git, Pull Masivo, Config Rutas)
   ──────────────────────────────────────────────────────
   [u] UPDATE SYSTEM       (Actualizar: Pacman/Yay)
   [c] CLEAN SYSTEM        (Limpiar Cache/Huerfanos)
@@ -36,7 +45,7 @@ Suite modular de herramientas CLI para administrar hardware, redes, Docker, proy
   [S] SOFTWARE CENTER     [q] SALIR
 ```
 
-El dashboard se **auto-refresca cada 3 segundos** mostrando CPU, RAM, temperatura, IPs y procesos criticos en tiempo real, sin parpadeos.
+El dashboard se **auto-refresca cada 3 segundos** con CPU, RAM, temperatura, IPs y procesos criticos en tiempo real, sin parpadeos.
 
 ---
 
@@ -48,175 +57,182 @@ cd admin-cli-archlinux
 ./install.sh
 ```
 
-Esto hace tres cosas:
-1. Agrega `bin/` a tu `$PATH` (para usar las herramientas directamente)
-2. Crea el alias `admin` para lanzar el menu principal
-3. Da permisos de ejecucion a todos los scripts
-
-Despues recarga tu shell:
+Esto agrega `bin/` al `$PATH` y crea el alias `admin`. Recarga tu shell y listo:
 
 ```bash
 source ~/.bashrc   # o ~/.zshrc
+admin
 ```
-
-Escribe `admin` para empezar.
 
 ---
 
 ## Modulos
 
-### Dashboard en tiempo real (`cpu`)
+### Dashboard en tiempo real — `cpu`
 
-Monitor integrado en el menu principal. Muestra modelo de CPU, frecuencias por nucleo, temperatura, RAM, IPs y detecta procesos zombies o con consumo alto. Usa `tput` para refrescar sin parpadeos.
+Monitor del sistema integrado en el menu principal. Muestra modelo de CPU, frecuencias por nucleo, temperatura, RAM, IPs y alerta de procesos zombies o con consumo excesivo. Refresco suave con `tput` (sin parpadeos).
 
-```bash
-cpu   # Tambien funciona como comando independiente
-```
+### Redes & WiFi — `net`
 
-### Redes & WiFi (`net`)
+Panel completo de red: IP local/publica, ISP, gateway, firewall y tabla de puertos en escucha. Permite:
 
-Informacion completa de red: IP local/publica, ISP, gateway, estado del firewall y tabla de puertos en escucha. Acciones interactivas:
-
-- Liberar un puerto matando el proceso
-- Conectar/configurar WiFi (nmtui, nmcli o iwctl)
+- Liberar un puerto matando su proceso
+- Conectar WiFi (nmtui / nmcli / iwctl)
 - Escaneo de red local con Nmap
 - Speedtest integrado
 - Limpieza masiva de procesos dev (Node, Python, Vite)
 
-### Procesos (`procs`)
+### Procesos — `procs`
 
-Gestor interactivo con vistas por consumo de CPU, RAM, busqueda por nombre y listado completo. Permite matar procesos directamente por PID, con escalado automatico a `sudo kill -9` si es necesario.
+Gestor interactivo con vistas por CPU, RAM, busqueda por nombre y listado completo. Mata procesos por PID con escalado a `kill -9` si resisten.
 
-### Hardware (`hdw`)
+### Hardware — `hdw`
 
-Inspector que muestra discos/particiones (sin loops), puertos serial/TTY (Arduino, ESP32), dispositivos USB, GPU y camaras/webcams detectadas.
+Inspector de discos/particiones, puertos serial (Arduino, ESP32), USB, GPU y webcams.
 
-### Docker Manager (`dock`)
+### Docker Manager — `dock`
 
-Gestion completa de contenedores:
-- Listar, iniciar, detener y eliminar contenedores
-- Ver logs en vivo (`docker logs -f`)
-- Entrar a la shell del contenedor (`bash` o `sh`)
-- Ver imagenes locales y stats en tiempo real
-- `docker system prune` con confirmacion
+Gestion completa de contenedores: listar, start/stop, logs en vivo, shell interactiva, imagenes, stats y prune. Instala Docker y configura permisos automaticamente si faltan.
 
-Instala Docker automaticamente si no lo encuentra y configura los permisos de grupo.
+### Gestor de Proyectos — `git-tool`
 
-### Git Projects (`git-tool`)
+Escanea tus carpetas de proyectos y muestra el estado git de cada repo (limpio / modificado / untracked).
 
-Escanea automaticamente tus carpetas de proyectos (`~/Proyectos`, `~/Projects`, `~/dev`, etc.) y muestra el estado de cada repo: limpio, modificado o con archivos sin trackear.
-
+- **Rutas configurables** — guardadas en `~/.config/admin-cli/projects.conf`
+- **Navegador de carpetas** — la primera vez, navegas visualmente desde `$HOME` para elegir donde estan tus proyectos
 - Pull masivo de todos los repos
-- Abrir sub-shell directamente en un proyecto
-- Re-escaneo bajo demanda
+- Sub-shell directa en cualquier proyecto
+- Agregar/eliminar directorios en cualquier momento con `[d]`
 
-### Backup & Migracion (`bak`)
+### Limpiador de Dependencias — `gestionar_proyectos.sh`
+
+Herramienta avanzada para liberar espacio en disco analizando proyectos de desarrollo:
+
+- **Detecta automaticamente** todos los proyectos en tu carpeta
+- Escanea `node_modules/`, `target/` (Rust), `dist/`, `.next/`, `.nuxt/`, `venv/`
+- Muestra tabla con espacio recuperable por proyecto y tipo
+- **Verifica git antes de limpiar** — bloquea limpieza si hay cambios sin commitear
+- Opciones para auto-commit con IA (Claude/Gemini) o stash antes de limpiar
+- Inicializar git y crear repos en GitHub desde el mismo menu
+- Ofrece migrar de npm a pnpm para ahorrar espacio
+- Configura `CARGO_TARGET_DIR` compartido para proyectos Rust/Tauri
+- Lanza proyectos (dev server) tras instalar dependencias
+
+```bash
+./gestionar_proyectos.sh
+```
+
+### Backup & Migracion — `bak`
 
 Empaqueta configuraciones criticas en un `.tar.gz` portable:
 
-| Categoria | Que respalda |
+| Que respalda | Detalle |
 |---|---|
-| **Navegador** | Bookmarks, historial y datos de Brave |
-| **FTP** | Sitios y config de FileZilla |
-| **Impresion 3D** | Perfiles de PrusaSlicer, OrcaSlicer, BambuStudio |
+| **Brave** | Bookmarks, historial, login data |
+| **FileZilla** | Sitios y configuracion |
+| **Slicers 3D** | PrusaSlicer, OrcaSlicer, BambuStudio |
 | **Impresoras** | Colas CUPS, PPDs custom, drivers HP |
 
-Incluye restauracion con un comando.
+Incluye restauracion completa.
 
-### Software Center (`software`)
+### Software Center — `software`
 
-Menu interactivo con `dialog` para instalar tu stack completo. Categorias:
+Menu interactivo con `dialog` para instalar tu stack:
 
-- **3D & CNC:** Blender, FreeCAD, PrusaSlicer, OrcaSlicer, Lychee, gSender
+- **3D / CNC:** Blender, FreeCAD, PrusaSlicer, OrcaSlicer, Lychee, gSender
 - **Electronica:** ST-Link, OpenOCD, Minicom
-- **Desarrollo:** VS Code, Docker, Node.js, Rust, Python, Git
+- **Dev:** VS Code, Docker, Node.js, Rust, Git, GitHub Desktop
 - **Graficos:** GIMP, Inkscape, Kdenlive, OBS
 - **Oficina:** LibreOffice, Teams, Zoom, Rambox, AnyDesk
 - **Navegadores:** Brave, Firefox, Chromium
 - **Utilidades:** VirtualBox, Balena Etcher, GParted, fuentes
 
-Configura **Chaotic-AUR** automaticamente para acelerar las instalaciones desde AUR.
+Configura **Chaotic-AUR** automaticamente para binarios pre-compilados.
 
-### Impresoras Epson (`printer`)
+### Impresoras Epson — `printer`
 
-Modulo especializado para impresoras Epson:
 - Instalar driver `escpr2` desde AUR
-- Detectar y agregar impresoras por red o USB
-- **Agregar hojas de tamano custom** al PPD (con/sin bordes)
-- Compensacion automatica de 3mm para borderless
+- Detectar y agregar impresoras por red/USB
+- Agregar hojas de tamano custom al PPD (con/sin bordes)
+- Compensacion de 3mm para borderless en Epson
 - Listar y eliminar tamanos custom
 
-### Otros modulos
+### Mas modulos
 
-| Modulo | Comando | Funcion |
+| Modulo | Tecla | Que hace |
 |---|---|---|
 | **Update** | `u` | Actualiza con `yay` o `pacman -Syu` |
-| **Clean** | `c` | Limpia cache, reduce journals a 50MB, elimina huerfanos |
-| **Logs** | `l` | Muestra errores criticos del boot actual (`journalctl -p 3`) |
-| **Reparar Arch** | `fix-arch` | Repara llaves PGP, instala yay, optimiza mirrors con reflector, desbloquea db.lck |
-| **Permisos** | `perm` | Repara grupos serial/Arduino, chown recursivo, chmod +x |
-| **Media A/V** | `media` | Forzar brillo, resetear pantallas KDE, reiniciar Pipewire, unmute de emergencia |
-| **Fixes** | `fixes` | Fix LibreOffice GTK3 en KDE (alias + parcheado de .desktop) |
-| **Setup Base** | `setup` | Configuracion inicial: Chaotic-AUR + Micromamba + apps base |
+| **Clean** | `c` | Limpia cache, journals a 50MB, elimina huerfanos |
+| **Logs** | `l` | Errores criticos del boot actual (`journalctl -p 3`) |
+| **Reparar Arch** | `r` | Fix llaves PGP, instala yay, reflector, desbloquea db.lck |
+| **Permisos** | `p` | Fix grupos serial/Arduino, chown, chmod +x |
+| **Media A/V** | `m` | Forzar brillo, resetear pantallas KDE, reiniciar Pipewire |
+| **Fixes** | `f` | Fix LibreOffice GTK3 en KDE |
+| **Setup Base** | `0` | Chaotic-AUR + Micromamba + apps base |
 
 ---
 
-## Estructura del proyecto
+## Estructura
 
 ```
 admin-cli-archlinux/
-├── admin.sh              # Entry point - Menu principal con dashboard
-├── install.sh            # Instalador (PATH + alias)
+├── admin.sh                    # Entry point — menu principal con dashboard
+├── install.sh                  # Instalador (PATH + alias)
+├── gestionar_proyectos.sh      # Limpiador de dependencias de proyectos
 ├── config/
-│   └── colors.theme      # Paleta de colores centralizada
+│   └── colors.theme            # Paleta de colores centralizada
 ├── lib/
-│   ├── utils.sh          # Helpers: pause, headers, sudo check
-│   ├── system_ops.sh     # Logica de update y clean
-│   └── logs_ops.sh       # Visualizacion de logs criticos
+│   ├── utils.sh                # Helpers: pause, headers, sudo check
+│   ├── system_ops.sh           # Update y clean del sistema
+│   └── logs_ops.sh             # Logs criticos
 └── bin/
-    ├── cpu               # Dashboard de sistema
-    ├── net               # Radar de red
-    ├── procs             # Gestor de procesos
-    ├── hdw               # Inspector de hardware
-    ├── dock              # Docker manager
-    ├── git-tool          # Estado de repos Git
-    ├── bak               # Backup y migracion
-    ├── software          # Centro de software (dialog)
-    ├── printer           # Gestion impresoras Epson
-    ├── fix-arch          # Reparador de Pacman
-    ├── setup             # Setup base del sistema
-    ├── perm              # Gestor de permisos
-    ├── media             # Control A/V
-    └── fixes             # Fixes de apps
+    ├── cpu                     # Dashboard de sistema
+    ├── net                     # Radar de red
+    ├── procs                   # Gestor de procesos
+    ├── hdw                     # Inspector de hardware
+    ├── dock                    # Docker manager
+    ├── git-tool                # Gestor de proyectos Git
+    ├── bak                     # Backup y migracion
+    ├── software                # Centro de software
+    ├── printer                 # Impresoras Epson
+    ├── fix-arch                # Reparador de Pacman
+    ├── setup                   # Setup base
+    ├── perm                    # Permisos
+    ├── media                   # Control A/V
+    └── fixes                   # Fixes de apps
+```
+
+**Configuracion de usuario** (fuera del repo):
+```
+~/.config/admin-cli/
+└── projects.conf               # Rutas de carpetas de proyectos
 ```
 
 ---
 
 ## Requisitos
 
-**Minimos** (el resto se instala bajo demanda):
+**Minimos:** Arch Linux (o EndeavourOS/derivados), `bash`, `sudo`, `pacman`.
 
-- Arch Linux, EndeavourOS o derivados
-- `bash`, `sudo`, `pacman`
-
-**Recomendados** (se ofrecen instalar automaticamente si faltan):
+Las dependencias opcionales se ofrecen instalar automaticamente cuando se necesitan:
 
 | Paquete | Usado por |
 |---|---|
-| `sysstat` | Dashboard CPU (mpstat) |
-| `lm_sensors` | Temperatura del procesador |
-| `nmap` | Escaneo de red local |
+| `sysstat` | Dashboard (mpstat) |
+| `lm_sensors` | Temperatura CPU |
+| `nmap` | Escaneo de red |
 | `speedtest-cli` | Test de velocidad |
-| `jq` | Parseo de IP publica |
+| `jq` | Parseo IP publica |
 | `dialog` | Software Center |
 | `docker` | Docker Manager |
 | `pamixer` | Control de volumen |
+| `reflector` | Optimizar mirrors |
 
 ---
 
-## Uso directo de herramientas
+## Uso directo
 
-Ademas del menu principal, cada herramienta funciona de forma independiente:
+Cada herramienta funciona de forma independiente sin necesidad del menu:
 
 ```bash
 cpu          # Dashboard de sistema
@@ -224,22 +240,27 @@ net          # Radar de red
 procs        # Gestor de procesos
 hdw          # Inspector de hardware
 dock         # Docker manager
-git-tool     # Estado de repos
+git-tool     # Gestor de proyectos
 perm         # Permisos
 media        # Audio/Video
+fix-arch     # Reparador de Arch
 ```
 
 ---
 
 ## Personalizacion
 
-Edita `config/colors.theme` para cambiar la paleta de colores de toda la suite:
+Edita `config/colors.theme` para cambiar la paleta de toda la suite:
 
 ```bash
 GREEN="\033[32m"
 BLUE="\033[34m"
 CYAN="\033[36m"
-# ...
+RED="\033[31m"
+YELLOW="\033[33m"
+MAGENTA="\033[35m"
+BOLD="\033[1m"
+NC="\033[0m"
 ```
 
 ---
@@ -248,10 +269,11 @@ CYAN="\033[36m"
 
 1. Fork del repo
 2. Crea tu branch (`git checkout -b feature/mi-modulo`)
-3. Commit tus cambios
-4. Push al branch
-5. Abre un Pull Request
+3. Commit y push
+4. Abre un Pull Request
 
 ---
 
-<p align="center">Hecho con bash para Arch Linux.</p>
+<p align="center">
+Hecho con Bash para Arch Linux
+</p>
