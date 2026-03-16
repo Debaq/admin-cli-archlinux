@@ -440,16 +440,200 @@ remove_custom_size() {
 }
 
 # ==========================================
+# 6. HP LaserJet P1102w (Plugin propietario)
+# ==========================================
+
+HP_PLUGIN_VERSION="3.25.8"
+HP_PLUGIN_FILE="$BASE_DIR/assets/hplip-${HP_PLUGIN_VERSION}-plugin.run"
+HP_PLUGIN_URL="https://www.openprinting.org/download/printdriver/auxfiles/HP/plugins/hplip-${HP_PLUGIN_VERSION}-plugin.run"
+
+check_hplip() {
+    pacman -Qi hplip &>/dev/null
+}
+
+check_hp_plugin() {
+    # El plugin instalado deja archivos en /usr/share/hplip/data/firmware/
+    [ -d "/usr/share/hplip/data/firmware" ] && \
+    ls /usr/share/hplip/data/firmware/*.fw &>/dev/null 2>&1
+}
+
+list_cups_hp() {
+    lpstat -e 2>/dev/null | while read -r printer; do
+        if lpstat -v "$printer" 2>/dev/null | grep -qi "hp\|laserjet"; then
+            echo "$printer"
+        fi
+    done
+}
+
+install_hp_p1102w() {
+    echo -e "\n${YELLOW}${BOLD}--- HP LaserJet P1102w: INSTALACIÓN COMPLETA ---${NC}"
+    echo -e ""
+
+    # PASO 1: hplip
+    echo -e "${BOLD}[1/4] Verificando hplip...${NC}"
+    if check_hplip; then
+        local ver=$(pacman -Q hplip | awk '{print $2}')
+        echo -e "  ${GREEN}hplip ya instalado ($ver)${NC}"
+    else
+        echo -e "  ${YELLOW}Instalando hplip...${NC}"
+        sudo pacman -S --noconfirm hplip
+        if [ $? -ne 0 ]; then
+            echo -e "  ${RED}Error instalando hplip${NC}"
+            return 1
+        fi
+        echo -e "  ${GREEN}hplip instalado${NC}"
+    fi
+
+    # Verificar que la version del plugin coincide con hplip instalado
+    local installed_ver=$(pacman -Q hplip | awk '{print $2}' | cut -d'-' -f1 | sed 's/^[0-9]*://')
+    if [ "$installed_ver" != "$HP_PLUGIN_VERSION" ]; then
+        echo -e ""
+        echo -e "  ${YELLOW}AVISO: Tu hplip es v${installed_ver} pero el plugin local es v${HP_PLUGIN_VERSION}${NC}"
+        echo -e "  ${YELLOW}Intentando descargar el plugin correcto...${NC}"
+        local DOWNLOAD_URL="https://www.openprinting.org/download/printdriver/auxfiles/HP/plugins/hplip-${installed_ver}-plugin.run"
+        local DOWNLOAD_FILE="/tmp/hplip-${installed_ver}-plugin.run"
+        curl -L --max-time 120 -o "$DOWNLOAD_FILE" "$DOWNLOAD_URL" 2>/dev/null
+        if [ -f "$DOWNLOAD_FILE" ] && [ "$(stat -c%s "$DOWNLOAD_FILE")" -gt 100000 ]; then
+            HP_PLUGIN_FILE="$DOWNLOAD_FILE"
+            echo -e "  ${GREEN}Plugin v${installed_ver} descargado${NC}"
+        else
+            echo -e "  ${RED}No se pudo descargar. Intentando con el plugin local...${NC}"
+        fi
+    fi
+
+    # PASO 2: Plugin propietario
+    echo -e ""
+    echo -e "${BOLD}[2/4] Instalando plugin propietario...${NC}"
+    if check_hp_plugin; then
+        echo -e "  ${GREEN}Plugin ya instalado${NC}"
+    else
+        if [ -f "$HP_PLUGIN_FILE" ]; then
+            echo -e "  ${CYAN}Usando plugin local: $(basename "$HP_PLUGIN_FILE")${NC}"
+            # hp-plugin puede instalar desde archivo local
+            sudo sh "$HP_PLUGIN_FILE" -- -i 2>/dev/null
+            # Alternativa si falla: instalar manualmente
+            if ! check_hp_plugin; then
+                echo -e "  ${YELLOW}Método directo falló. Intentando con hp-plugin...${NC}"
+                echo "y" | sudo hp-plugin -i -p "$HP_PLUGIN_FILE" 2>/dev/null
+            fi
+            if ! check_hp_plugin; then
+                echo -e "  ${YELLOW}Intentando extracción manual...${NC}"
+                local tmp_extract=$(mktemp -d)
+                sh "$HP_PLUGIN_FILE" --noexec --target "$tmp_extract" 2>/dev/null
+                if [ -d "$tmp_extract/plugin_install.py" ] || [ -f "$tmp_extract/plugin_install.py" ]; then
+                    sudo python3 "$tmp_extract/plugin_install.py" 2>/dev/null
+                fi
+                # Copiar firmware manualmente si existe
+                if ls "$tmp_extract"/*.fw &>/dev/null 2>&1; then
+                    sudo mkdir -p /usr/share/hplip/data/firmware/
+                    sudo cp "$tmp_extract"/*.fw /usr/share/hplip/data/firmware/
+                fi
+                if ls "$tmp_extract/data/firmware/"*.fw &>/dev/null 2>&1; then
+                    sudo mkdir -p /usr/share/hplip/data/firmware/
+                    sudo cp "$tmp_extract/data/firmware/"*.fw /usr/share/hplip/data/firmware/
+                fi
+                rm -rf "$tmp_extract"
+            fi
+        else
+            echo -e "  ${YELLOW}Plugin local no encontrado. Descargando...${NC}"
+            echo "y" | sudo hp-plugin -i 2>/dev/null
+        fi
+
+        if check_hp_plugin; then
+            echo -e "  ${GREEN}Plugin instalado correctamente${NC}"
+        else
+            echo -e "  ${RED}No se pudo instalar el plugin automáticamente.${NC}"
+            echo -e "  ${YELLOW}Intenta manualmente: sudo hp-plugin -i${NC}"
+        fi
+    fi
+
+    # PASO 3: Servicios
+    echo -e ""
+    echo -e "${BOLD}[3/4] Verificando servicios...${NC}"
+    if ! systemctl is-active --quiet cups; then
+        echo -e "  ${YELLOW}Iniciando CUPS...${NC}"
+        sudo systemctl enable --now cups
+    fi
+    echo -e "  ${GREEN}CUPS activo${NC}"
+
+    # PASO 4: Configurar impresora
+    echo -e ""
+    echo -e "${BOLD}[4/4] Configurando impresora...${NC}"
+    echo -e "  ${CYAN}Buscando HP LaserJet P1102w...${NC}"
+
+    # Buscar la impresora
+    local hp_devices
+    hp_devices=$(sudo lpinfo -v 2>/dev/null | grep -i "hp\|laserjet\|1102")
+
+    if [ -z "$hp_devices" ]; then
+        echo -e "  ${YELLOW}No se detectó por auto-descubrimiento.${NC}"
+        echo -e "  Opciones:"
+        echo -e "    [${BOLD}1${NC}] Buscar con hp-setup (interfaz interactiva)"
+        echo -e "    [${BOLD}2${NC}] Agregar por IP manualmente"
+        echo -e "    [${BOLD}3${NC}] Buscar USB"
+        echo -e "    [${BOLD}q${NC}] Salir"
+        echo -ne "  ${BOLD}> ${NC}"
+        read -r HP_OPT
+
+        case $HP_OPT in
+            1)
+                echo -e "  ${CYAN}Lanzando hp-setup...${NC}"
+                sudo hp-setup -i
+                ;;
+            2)
+                echo -ne "  ${BOLD}IP de la impresora: ${NC}"
+                read -r HP_IP
+                if [ -n "$HP_IP" ]; then
+                    echo -e "  ${CYAN}Agregando HP LaserJet en $HP_IP...${NC}"
+                    sudo lpadmin -p "HP_LaserJet_P1102w" -E \
+                        -v "hp:/net/HP_LaserJet_Professional_P_1102w?ip=$HP_IP" \
+                        -m "drv:///hp/hplip.drv/hp-laserjet_professional_p_1102w.ppd"
+                    sudo cupsenable "HP_LaserJet_P1102w" 2>/dev/null
+                    sudo cupsaccept "HP_LaserJet_P1102w" 2>/dev/null
+                    echo -e "  ${GREEN}Impresora agregada como HP_LaserJet_P1102w${NC}"
+                fi
+                ;;
+            3)
+                echo -e "  ${CYAN}Buscando por USB...${NC}"
+                sudo hp-setup -i -b usb
+                ;;
+        esac
+    else
+        echo -e "  ${GREEN}Dispositivo(s) detectado(s):${NC}"
+        echo "$hp_devices" | while read -r line; do
+            echo -e "    ${CYAN}$line${NC}"
+        done
+        echo -e ""
+        echo -e "  Lanzando configuración automática..."
+        sudo hp-setup -i
+    fi
+
+    # Resultado final
+    echo -e ""
+    local hp_cups=$(list_cups_hp)
+    if [ -n "$hp_cups" ]; then
+        echo -e "${GREEN}${BOLD}HP LaserJet P1102w configurada correctamente.${NC}"
+        echo -e "Impresora(s) HP en CUPS:"
+        while IFS= read -r p; do
+            echo -e "  ${CYAN}→ $p${NC}"
+        done <<< "$hp_cups"
+        echo -e ""
+        echo -e "Prueba con: ${BOLD}lp -d $(echo "$hp_cups" | head -1) /usr/share/cups/data/testprint${NC}"
+    fi
+}
+
+# ==========================================
 # MENÚ PRINCIPAL
 # ==========================================
 
 clear
 echo -e "${BLUE}${BOLD}==================================================${NC}"
-echo -e "           ${YELLOW}${BOLD}GESTIÓN DE IMPRESORAS EPSON${NC}"
+echo -e "           ${YELLOW}${BOLD}GESTIÓN DE IMPRESORAS${NC}"
 echo -e "${BLUE}${BOLD}==================================================${NC}"
 
-# --- Status ---
+# --- Status Epson ---
 echo -e ""
+echo -e "  ${BOLD}EPSON:${NC}"
 if check_driver; then
     echo -e "  Driver:  ${GREEN}$DRIVER_PKG instalado${NC}"
 else
@@ -458,20 +642,43 @@ fi
 
 local_printers=$(list_cups_epson)
 if [ -n "$local_printers" ]; then
-    echo -e "  CUPS:    ${GREEN}$(echo "$local_printers" | wc -l) impresora(s) Epson${NC}"
+    echo -e "  CUPS:    ${GREEN}$(echo "$local_printers" | wc -l) impresora(s)${NC}"
     while IFS= read -r p; do
         echo -e "           ${CYAN}→ $p${NC}"
     done <<< "$local_printers"
 else
-    echo -e "  CUPS:    ${YELLOW}Sin impresoras Epson configuradas${NC}"
+    echo -e "  CUPS:    ${YELLOW}Sin impresoras Epson${NC}"
+fi
+
+# --- Status HP ---
+echo -e ""
+echo -e "  ${BOLD}HP:${NC}"
+if check_hplip; then
+    echo -e "  hplip:   ${GREEN}instalado$(check_hp_plugin && echo " + plugin" || echo "")${NC}"
+else
+    echo -e "  hplip:   ${RED}No instalado${NC}"
+fi
+
+hp_printers=$(list_cups_hp)
+if [ -n "$hp_printers" ]; then
+    echo -e "  CUPS:    ${GREEN}$(echo "$hp_printers" | wc -l) impresora(s)${NC}"
+    while IFS= read -r p; do
+        echo -e "           ${CYAN}→ $p${NC}"
+    done <<< "$hp_printers"
+else
+    echo -e "  CUPS:    ${YELLOW}Sin impresoras HP${NC}"
 fi
 
 echo -e ""
+echo -e "${BLUE}  ── EPSON ──────────────────────────────────────────${NC}"
 echo -e "  [${BOLD}1${NC}] Instalar/Verificar driver (escpr2)"
 echo -e "  [${BOLD}2${NC}] Detectar y agregar impresora (Red/USB)"
 echo -e "  [${BOLD}3${NC}] ${BOLD}Agregar hoja custom${NC} (con/sin bordes)"
 echo -e "  [${BOLD}4${NC}] Ver hojas custom configuradas"
 echo -e "  [${BOLD}5${NC}] Eliminar hoja custom"
+echo -e "${BLUE}  ── HP ─────────────────────────────────────────────${NC}"
+echo -e "  [${BOLD}h${NC}] ${BOLD}HP LaserJet P1102w${NC} (Instalación completa + plugin)"
+echo -e ""
 echo -e "  [${BOLD}q${NC}] Salir"
 echo -e ""
 echo -ne "${BOLD}Opción > ${NC}"
@@ -483,6 +690,7 @@ case $OPT in
     3) add_custom_size ;;
     4) list_custom_sizes ;;
     5) remove_custom_size ;;
+    h|H) install_hp_p1102w ;;
     q|Q) exit 0 ;;
     *) echo "Opción inválida." ;;
 esac
