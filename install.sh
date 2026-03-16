@@ -1,7 +1,7 @@
 #!/bin/bash
 # install.sh
 
-INSTALL_DIR=$(pwd)
+INSTALL_DIR=$(dirname "$(readlink -f "$0")")
 BIN_DIR="$INSTALL_DIR/bin"
 ADMIN_SCRIPT="$INSTALL_DIR/admin.sh"
 
