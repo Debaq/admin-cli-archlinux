@@ -625,7 +625,8 @@ install_hp_p1102w() {
     echo -e "  ${CYAN}Buscando dispositivos HP...${NC}"
 
     local hp_devices
-    hp_devices=$(sudo lpinfo -v 2>/dev/null | grep -i "hp\|laserjet\|1102")
+    hp_devices=$(sudo lpinfo -v 2>/dev/null | grep -i "hp\|laserjet\|1102" | grep ":/")
+
 
     # Buscar el PPD/driver correcto
     local ppd_model
