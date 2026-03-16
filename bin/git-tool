@@ -9,33 +9,147 @@ source "$BASE_DIR/lib/utils.sh"
 CONFIG_DIR="$HOME/.config/admin-cli"
 CONFIG_FILE="$CONFIG_DIR/projects.conf"
 
-# Crear config con rutas por defecto si no existe
 init_config() {
     if [ ! -f "$CONFIG_FILE" ]; then
         mkdir -p "$CONFIG_DIR"
-        cat > "$CONFIG_FILE" << EOF
+        cat > "$CONFIG_FILE" << 'EOF'
 # Directorios donde buscar proyectos (uno por línea)
-# Líneas vacías y comentarios (#) son ignorados
-$HOME/Proyectos
-$HOME/Projects
-$HOME/Escritorio/Proyectos
-$HOME/dev
-$HOME/workspace
+# Usa [d] > [a] en el Gestor de Proyectos para agregar rutas
 EOF
-        echo -e "${GREEN}Archivo de configuración creado: $CONFIG_FILE${NC}"
     fi
 }
 
-# Leer rutas del config (ignora comentarios y líneas vacías)
 load_search_roots() {
     SEARCH_ROOTS=()
     while IFS= read -r line; do
-        # Ignorar comentarios y líneas vacías
         [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]] && continue
-        # Expandir variables como $HOME
         expanded=$(eval echo "$line")
         SEARCH_ROOTS+=("$expanded")
     done < "$CONFIG_FILE"
+}
+
+# ==========================================
+# NAVEGADOR DE CARPETAS
+# ==========================================
+
+browse_directory() {
+    local current="$HOME"
+
+    while true; do
+        clear
+        echo -e "${BLUE}${BOLD}==================================================${NC}"
+        echo -e "           ${CYAN}${BOLD}NAVEGADOR DE CARPETAS${NC}"
+        echo -e "${BLUE}${BOLD}==================================================${NC}"
+        echo -e ""
+        echo -e "${BOLD}Ubicación:${NC} ${CYAN}$current${NC}"
+        echo -e "${BLUE}--------------------------------------------------${NC}"
+
+        # Listar subdirectorios
+        local dirs=()
+        while IFS= read -r d; do
+            dirs+=("$d")
+        done < <(find "$current" -maxdepth 1 -mindepth 1 -type d ! -name '.*' 2>/dev/null | sort)
+
+        if [ ${#dirs[@]} -eq 0 ]; then
+            echo -e "  ${YELLOW}(sin subcarpetas)${NC}"
+        else
+            local i=1
+            for d in "${dirs[@]}"; do
+                local name=$(basename "$d")
+                local marker=""
+                # Marcar si tiene repos git dentro
+                if [ -d "$d/.git" ]; then
+                    marker=" ${GREEN}(repo git)${NC}"
+                fi
+                echo -e "  ${CYAN}[${i}]${NC} 📁 ${BOLD}${name}${NC}${marker}"
+                ((i++))
+            done
+        fi
+
+        echo -e "${BLUE}--------------------------------------------------${NC}"
+        echo -e "  ${GREEN}[Enter]${NC}  ${BOLD}SELECCIONAR${NC} esta carpeta como raíz de proyectos"
+        echo -e "  [${BOLD}..${NC}]     Subir un nivel"
+        echo -e "  [${BOLD}.${NC}]      Mostrar carpetas ocultas"
+        echo -e "  [${BOLD}/${NC}]      Escribir ruta manualmente"
+        echo -e "  [${BOLD}q${NC}]      Cancelar"
+        echo -e ""
+        echo -ne "${BOLD}Navegar > ${NC}"
+        read -r NAV
+
+        # Seleccionar directorio actual
+        if [ -z "$NAV" ]; then
+            echo "$current"
+            return 0
+        fi
+
+        # Cancelar
+        if [[ "$NAV" == "q" || "$NAV" == "Q" ]]; then
+            return 1
+        fi
+
+        # Subir nivel
+        if [[ "$NAV" == ".." ]]; then
+            local parent=$(dirname "$current")
+            if [ "$parent" != "$current" ]; then
+                current="$parent"
+            fi
+            continue
+        fi
+
+        # Mostrar ocultas
+        if [[ "$NAV" == "." ]]; then
+            clear
+            echo -e "${BLUE}${BOLD}==================================================${NC}"
+            echo -e "        ${CYAN}${BOLD}CARPETAS OCULTAS EN:${NC} $current"
+            echo -e "${BLUE}${BOLD}==================================================${NC}"
+
+            local hidden=()
+            while IFS= read -r d; do
+                hidden+=("$d")
+            done < <(find "$current" -maxdepth 1 -mindepth 1 -type d -name '.*' 2>/dev/null | sort)
+
+            if [ ${#hidden[@]} -eq 0 ]; then
+                echo -e "  ${YELLOW}(sin carpetas ocultas)${NC}"
+            else
+                local j=1
+                for d in "${hidden[@]}"; do
+                    echo -e "  ${CYAN}[${j}]${NC} 📁 ${BOLD}$(basename "$d")${NC}"
+                    ((j++))
+                done
+            fi
+
+            echo -e ""
+            echo -ne "${BOLD}Número para entrar (Enter para volver) > ${NC}"
+            read -r HSEL
+            if [[ "$HSEL" =~ ^[0-9]+$ ]] && [ "$HSEL" -ge 1 ] && [ "$HSEL" -le "${#hidden[@]}" ]; then
+                current="${hidden[$((HSEL-1))]}"
+            fi
+            continue
+        fi
+
+        # Ruta manual
+        if [[ "$NAV" == "/" ]]; then
+            echo -ne "${BOLD}Escribe la ruta: ${NC}"
+            read -e -r MANUAL_PATH
+            MANUAL_PATH=$(eval echo "$MANUAL_PATH")
+            if [ -d "$MANUAL_PATH" ]; then
+                current="$MANUAL_PATH"
+            else
+                echo -e "${RED}No existe: $MANUAL_PATH${NC}"
+                sleep 1
+            fi
+            continue
+        fi
+
+        # Navegar por número
+        if [[ "$NAV" =~ ^[0-9]+$ ]] && [ "$NAV" -ge 1 ] && [ "$NAV" -le "${#dirs[@]}" ]; then
+            current="${dirs[$((NAV-1))]}"
+            continue
+        fi
+
+        echo -e "${RED}Opción no válida.${NC}"
+        sleep 0.5
+    done
 }
 
 # ==========================================
@@ -48,33 +162,39 @@ manage_directories() {
         echo -e "${BLUE}${BOLD}==================================================${NC}"
         echo -e "           ${YELLOW}${BOLD}DIRECTORIOS DE PROYECTOS${NC}"
         echo -e "${BLUE}${BOLD}==================================================${NC}"
-        echo -e "${CYAN}Config: $CONFIG_FILE${NC}\n"
+        echo -e ""
 
-        # Mostrar directorios actuales con estado
-        echo -e "${BOLD}Directorios configurados:${NC}"
-        echo -e "${BLUE}--------------------------------------------------${NC}"
-
-        local i=1
         local dirs=()
         while IFS= read -r line; do
             [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]] && continue
             local expanded=$(eval echo "$line")
             dirs+=("$expanded")
-            if [ -d "$expanded" ]; then
-                local count=$(find "$expanded" -maxdepth 3 -name ".git" -type d 2>/dev/null | wc -l)
-                echo -e "  ${GREEN}[${i}]${NC} ${BOLD}$expanded${NC}"
-                echo -e "       ${CYAN}$count repos encontrados${NC}"
-            else
-                echo -e "  ${RED}[${i}]${NC} ${BOLD}$expanded${NC}"
-                echo -e "       ${RED}(directorio no existe)${NC}"
-            fi
-            ((i++))
         done < "$CONFIG_FILE"
 
+        if [ ${#dirs[@]} -eq 0 ]; then
+            echo -e "  ${YELLOW}No hay directorios configurados.${NC}"
+            echo -e "  ${YELLOW}Agrega uno para empezar a escanear proyectos.${NC}"
+        else
+            echo -e "${BOLD}Directorios configurados:${NC}"
+            echo -e "${BLUE}--------------------------------------------------${NC}"
+            local i=1
+            for d in "${dirs[@]}"; do
+                if [ -d "$d" ]; then
+                    local count=$(find "$d" -maxdepth 3 -name ".git" -type d 2>/dev/null | wc -l)
+                    echo -e "  ${GREEN}[${i}]${NC} ${BOLD}$d${NC}"
+                    echo -e "       ${CYAN}$count repos encontrados${NC}"
+                else
+                    echo -e "  ${RED}[${i}]${NC} ${BOLD}$d${NC}"
+                    echo -e "       ${RED}(no existe)${NC}"
+                fi
+                ((i++))
+            done
+        fi
+
         echo -e "${BLUE}--------------------------------------------------${NC}"
-        echo -e "  [${BOLD}a${NC}] ${GREEN}Agregar${NC} directorio"
+        echo -e "  [${BOLD}a${NC}] ${GREEN}Agregar${NC} directorio (Navegador)"
         echo -e "  [${BOLD}Número${NC}] ${RED}Eliminar${NC} directorio"
-        echo -e "  [${BOLD}e${NC}] ${YELLOW}Editar${NC} config manualmente ($EDITOR)"
+        echo -e "  [${BOLD}e${NC}] ${YELLOW}Editar${NC} config manualmente"
         echo -e "  [${BOLD}q${NC}] Volver"
         echo -e ""
         echo -ne "${BOLD}Opción > ${NC}"
@@ -82,44 +202,18 @@ manage_directories() {
 
         case $OPT in
             a)
-                echo -e ""
-                echo -ne "${BOLD}Ruta del directorio (Tab para autocompletar): ${NC}"
-                read -e -r NEW_DIR
-
-                if [ -z "$NEW_DIR" ]; then
-                    echo -e "${RED}Ruta vacía, cancelado.${NC}"
-                    sleep 1
-                    continue
-                fi
-
-                # Expandir ~ y variables
-                NEW_DIR=$(eval echo "$NEW_DIR")
-
-                if [ ! -d "$NEW_DIR" ]; then
-                    echo -e "${YELLOW}El directorio '$NEW_DIR' no existe.${NC}"
-                    echo -ne "¿Crearlo? [s/N]: "
-                    read -r CREATE
-                    if [[ "$CREATE" =~ ^[sS]$ ]]; then
-                        mkdir -p "$NEW_DIR"
-                        echo -e "${GREEN}Directorio creado.${NC}"
-                    else
-                        echo -e "No se agregó."
+                SELECTED=$(browse_directory)
+                if [ $? -eq 0 ] && [ -n "$SELECTED" ]; then
+                    if grep -qF "$SELECTED" "$CONFIG_FILE" 2>/dev/null; then
+                        echo -e "${YELLOW}Esa ruta ya está configurada.${NC}"
                         sleep 1
-                        continue
+                    else
+                        echo "$SELECTED" >> "$CONFIG_FILE"
+                        load_search_roots
+                        echo -e "${GREEN}Agregado: $SELECTED${NC}"
+                        sleep 1
                     fi
                 fi
-
-                # Verificar si ya existe en config
-                if grep -qF "$NEW_DIR" "$CONFIG_FILE" 2>/dev/null; then
-                    echo -e "${YELLOW}Esa ruta ya está en la configuración.${NC}"
-                    sleep 1
-                    continue
-                fi
-
-                echo "$NEW_DIR" >> "$CONFIG_FILE"
-                echo -e "${GREEN}Directorio agregado.${NC}"
-                load_search_roots
-                sleep 1
                 ;;
 
             e)
@@ -129,23 +223,21 @@ manage_directories() {
 
             q|Q)
                 load_search_roots
-                REPOS=()  # Forzar rescan con nuevas rutas
+                REPOS=()
                 return
                 ;;
 
             *)
-                # Eliminar por número
                 if [[ "$OPT" =~ ^[0-9]+$ ]] && [ "$OPT" -ge 1 ] && [ "$OPT" -le "${#dirs[@]}" ]; then
                     local to_remove="${dirs[$((OPT-1))]}"
-                    echo -ne "${RED}¿Eliminar '$to_remove' de la lista? [s/N]: ${NC}"
+                    echo -ne "${RED}¿Eliminar '$to_remove'? [s/N]: ${NC}"
                     read -r CONFIRM
                     if [[ "$CONFIRM" =~ ^[sS]$ ]]; then
-                        # Escapar caracteres especiales para grep/sed
                         local escaped=$(printf '%s\n' "$to_remove" | sed 's/[[\.*^$()+?{|]/\\&/g')
                         grep -v "^${escaped}$" "$CONFIG_FILE" > "${CONFIG_FILE}.tmp"
                         mv "${CONFIG_FILE}.tmp" "$CONFIG_FILE"
-                        echo -e "${GREEN}Eliminado.${NC}"
                         load_search_roots
+                        echo -e "${GREEN}Eliminado.${NC}"
                     fi
                     sleep 1
                 fi
@@ -158,7 +250,6 @@ manage_directories() {
 # ESCANEO DE REPOS
 # ==========================================
 
-# Colores de Estado
 STAT_DIRTY="${RED}📦 MODIFICADO${NC}"
 STAT_CLEAN="${GREEN}✨ LIMPIO${NC}"
 STAT_UNTRACKED="${YELLOW}❓ UNTRACKED${NC}"
@@ -166,7 +257,6 @@ STAT_UNTRACKED="${YELLOW}❓ UNTRACKED${NC}"
 scan_repos() {
     REPOS=()
     echo -e "${BLUE}Escaneando repositorios...${NC}"
-
     for root in "${SEARCH_ROOTS[@]}"; do
         if [ -d "$root" ]; then
             while IFS= read -r gitdir; do
@@ -184,6 +274,15 @@ scan_repos() {
 init_config
 load_search_roots
 
+# Si no hay rutas configuradas, ir directo a gestión
+if [ ${#SEARCH_ROOTS[@]} -eq 0 ]; then
+    clear
+    echo -e "${YELLOW}${BOLD}Primera vez: necesitas agregar al menos un directorio de proyectos.${NC}"
+    echo -e ""
+    sleep 1
+    manage_directories
+fi
+
 # ==========================================
 # PANTALLA PRINCIPAL
 # ==========================================
@@ -199,17 +298,16 @@ while true; do
     fi
 
     if [ ${#REPOS[@]} -eq 0 ]; then
-        echo -e "\n${YELLOW}No se encontraron repositorios en los directorios configurados.${NC}"
-        echo -e "Usa ${BOLD}[d]${NC} para agregar directorios donde buscar.\n"
+        echo -e "\n${YELLOW}No se encontraron repositorios.${NC}"
+        echo -e "Usa ${BOLD}[d]${NC} para configurar directorios.\n"
     else
-        echo -e "${BOLD}Repositorios encontrados:${NC} ${#REPOS[@]}  (${CYAN}${#SEARCH_ROOTS[@]} directorios${NC})"
+        echo -e "${BOLD}Repositorios:${NC} ${#REPOS[@]}  (${CYAN}${#SEARCH_ROOTS[@]} directorios${NC})"
         printf "${BOLD}%-4s %-35s %-15s${NC}\n" "ID" "PROYECTO" "ESTADO"
         echo -e "${BLUE}--------------------------------------------------${NC}"
 
         i=0
         for repo in "${REPOS[@]}"; do
             NAME=$(basename "$repo")
-
             cd "$repo"
             if [ -n "$(git status --porcelain)" ]; then
                 if [ -n "$(git status --porcelain | grep '^??')" ]; then
@@ -220,7 +318,6 @@ while true; do
             else
                 STATUS="$STAT_CLEAN"
             fi
-
             printf "${CYAN}[%d]${NC}  %-35s %b\n" "$i" "${NAME:0:34}" "$STATUS"
             ((i++))
         done
@@ -229,7 +326,7 @@ while true; do
     echo -e "${BLUE}==================================================${NC}"
     echo -e "  [${BOLD}p${NC}] ⬇️  ${BOLD}PULL ALL${NC} (Actualizar todos)"
     echo -e "  [${BOLD}s${NC}] 🔄 ${BOLD}Re-escanear${NC}"
-    echo -e "  [${BOLD}d${NC}] 📁 ${BOLD}Directorios${NC} (Configurar rutas de proyectos)"
+    echo -e "  [${BOLD}d${NC}] 📁 ${BOLD}Directorios${NC} (Configurar rutas)"
     echo -e "  [${BOLD}Número${NC}] Abrir terminal en el proyecto"
     echo -e "  [${BOLD}q${NC}] Salir"
     echo -e ""
@@ -248,25 +345,23 @@ while true; do
         continue
     fi
 
-    # PULL MASIVO
     if [[ "$OPT" == "p" ]]; then
-        echo -e "\n${YELLOW}Iniciando actualización masiva...${NC}"
+        echo -e "\n${YELLOW}Actualizando todos...${NC}"
         for repo in "${REPOS[@]}"; do
-            echo -ne "Actualizando $(basename "$repo")... "
+            echo -ne "$(basename "$repo")... "
             cd "$repo"
             git pull &>/dev/null
-            if [ $? -eq 0 ]; then echo -e "${GREEN}OK${NC}"; else echo -e "${RED}Error/Conflict${NC}"; fi
+            if [ $? -eq 0 ]; then echo -e "${GREEN}OK${NC}"; else echo -e "${RED}Error${NC}"; fi
         done
         pause
         continue
     fi
 
-    # ENTRAR A REPO
     if [[ "$OPT" =~ ^[0-9]+$ ]] && [ "$OPT" -lt "${#REPOS[@]}" ]; then
         TARGET="${REPOS[$OPT]}"
         clear
         echo -e "${GREEN}Entrando a: $TARGET${NC}"
-        echo -e "(Escribe 'exit' para volver al gestor)"
+        echo -e "(Escribe 'exit' para volver)"
         cd "$TARGET"
         $SHELL
         continue
